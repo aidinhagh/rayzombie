@@ -198,7 +198,7 @@ ALIASES = {
 EXTRA_NAMES: dict[str, list[str]] = {
      "bellacia0o7": ["صادق", "صادخ", "sadegh", "sadekh"],
      "Ezrail":   ["عزی", "ezi","عزرائیل"],
-    "ّ ":   ["داریوش", "darius","Darius","Dariush"]
+    "ّ ":   ["داریوش", "darius","Darius","Dariush"],
     "Morteza":  ["مری"]
 }
 
