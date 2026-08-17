@@ -199,7 +199,8 @@ EXTRA_NAMES: dict[str, list[str]] = {
      "bellacia0o7": ["صادق", "صادخ", "sadegh", "sadekh"],
      "Ezrail":   ["عزی", "ezi","عزرائیل"],
     "ّ ":   ["داریوش", "darius","Darius","Dariush"],
-    "Morteza":  ["مری"]
+    "Morteza":  ["مری"],
+    "Zane": ["زنه","زین","رادمهر","radmehr"]
 }
 
 # a first name is a stronger signal than a surname when scores are close
