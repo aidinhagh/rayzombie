@@ -183,10 +183,11 @@ class Candidate:
 # STRICTLY one nickname -> one canonical name. For "this person also goes by
 # these four spellings", use EXTRA_NAMES below instead.
 ALIASES = {
-    "ممد": "محمد", "ممدرضا": "محمدرضا", "مموتی": "محمد",
+    "ممد": "محمد", "ممدرضا": "محمدرضا", "مموتی": "محمود",
     "ابی": "ابراهیم", "اکی": "اکبر", "اصی": "اصغر", "عبی": "عباس",
     "حسی": "حسین", "رضی": "رضا", "مسی": "مسعود", "مجی": "مجید",
-    "نری": "نرگس", "زری": "زهرا", "فری": "فرشته", "سمی": "سمیرا",
+    "نری": "نرگس", "فری": "فرشته", "سمی": "سمیرا",
+    "موری":"مرتضی" 
     "moh": "mohammad", "mamad": "mohammad", "memad": "mohammad",
 }
 
@@ -198,6 +199,7 @@ EXTRA_NAMES: dict[str, list[str]] = {
      "bellacia0o7": ["صادق", "صادخ", "sadegh", "sadekh"],
      "Ezrail":   ["عزی", "ezi","عزرائیل"],
     "ّ ":   ["داریوش", "darius","Darius","Dariush"]
+    "Morteza":  ["مری"]
 }
 
 # a first name is a stronger signal than a surname when scores are close
