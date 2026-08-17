@@ -188,7 +188,7 @@ ALIASES = {
     "حسی": "حسین", "رضی": "رضا", "مسی": "مسعود", "مجی": "مجید",
     "نری": "نرگس", "فری": "فرشته", "سمی": "سمیرا",
     "موری":"مرتضی" 
-    "moh": "mohammad", "mamad": "mohammad", "memad": "mohammad",
+    "moh": "mohammad", "mamad": "mohammad", "memad": "mohammad"
 }
 
 # Extra spellings for ONE specific person, when their Telegram name gives the
