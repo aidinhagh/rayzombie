@@ -195,8 +195,9 @@ ALIASES = {
 # Key: their @username (no @, case-insensitive) OR their numeric user id.
 # Value: a list of every way people write them. Get the id from /whois.
 EXTRA_NAMES: dict[str, list[str]] = {
-    # "bellacia0o7": ["صادق", "صادخ", "sadegh", "sadekh"],
-    # "Ezrail":   ["عزی", "ezi","عزرائیل"],
+     "bellacia0o7": ["صادق", "صادخ", "sadegh", "sadekh"],
+     "Ezrail":   ["عزی", "ezi","عزرائیل"],
+    "ّ ":   ["داریوش", "darius","Darius","Dariush"]
 }
 
 # a first name is a stronger signal than a surname when scores are close
