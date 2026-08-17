@@ -170,24 +170,38 @@ class Candidate:
         full = " ".join(p for p in (self.first, self.last) if p)
         pairs = [("first", self.first), ("last", self.last),
                  ("full", full), ("username", self.username)]
+
+        handle = normalize(self.username).replace(" ", "")
+        for key in (handle, str(self.user_id)):
+            for extra in EXTRA_NAMES.get(key, ()):
+                pairs.append(("alias", extra))
+
         return [(kind, value) for kind, value in pairs if value]
 
 
 # Colloquial short forms that no phonetic rule will ever recover.
-# Add your group's own nicknames here — keys and values are matched loosely.
+# STRICTLY one nickname -> one canonical name. For "this person also goes by
+# these four spellings", use EXTRA_NAMES below instead.
 ALIASES = {
     "ممد": "محمد", "ممدرضا": "محمدرضا", "مموتی": "محمد",
     "ابی": "ابراهیم", "اکی": "اکبر", "اصی": "اصغر", "عبی": "عباس",
     "حسی": "حسین", "رضی": "رضا", "مسی": "مسعود", "مجی": "مجید",
     "نری": "نرگس", "زری": "زهرا", "فری": "فرشته", "سمی": "سمیرا",
     "moh": "mohammad", "mamad": "mohammad", "memad": "mohammad",
-    "ezi": "ezrail", "عزی": "عزرائیل", "رادمهر": "",
-    "اینفو": "اینفورمز", "رادمهر": "زین",
-  "BellaCia0o7": "صادق","صادخ","sadegh","sadekh"
+}
+
+# Extra spellings for ONE specific person, when their Telegram name gives the
+# matcher nothing to work with (a handle like "BellaCia0o7" for صادق).
+# Key: their @username (no @, case-insensitive) OR their numeric user id.
+# Value: a list of every way people write them. Get the id from /whois.
+EXTRA_NAMES: dict[str, list[str]] = {
+    # "bellacia0o7": ["صادق", "صادخ", "sadegh", "sadekh"],
+    # "Ezrail":   ["عزی", "ezi","عزرائیل"],
 }
 
 # a first name is a stronger signal than a surname when scores are close
-_FIELD_WEIGHT = {"first": 1.0, "full": 0.99, "username": 0.98, "last": 0.96}
+_FIELD_WEIGHT = {"first": 1.0, "alias": 1.0, "full": 0.99,
+                 "username": 0.98, "last": 0.96}
 
 THRESHOLD = 0.74
 
