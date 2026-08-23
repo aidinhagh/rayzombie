@@ -183,12 +183,11 @@ class Candidate:
 # STRICTLY one nickname -> one canonical name. For "this person also goes by
 # these four spellings", use EXTRA_NAMES below instead.
 ALIASES = {
-    "ممد": "محمد", "ممدرضا": "محمدرضا", "مموتی": "محمود",
+    "ممد": "محمد", "ممدرضا": "محمدرضا", "مموتی": "محمد",
     "ابی": "ابراهیم", "اکی": "اکبر", "اصی": "اصغر", "عبی": "عباس",
     "حسی": "حسین", "رضی": "رضا", "مسی": "مسعود", "مجی": "مجید",
-    "نری": "نرگس", "فری": "فرشته", "سمی": "سمیرا",
-    "موری":"مرتضی", 
-    "moh": "mohammad", "mamad": "mohammad", "memad": "mohammad"
+    "نری": "نرگس", "زری": "زهرا", "فری": "فرشته", "سمی": "سمیرا",
+    "moh": "mohammad", "mamad": "mohammad", "memad": "mohammad",
 }
 
 # Extra spellings for ONE specific person, when their Telegram name gives the
@@ -196,11 +195,8 @@ ALIASES = {
 # Key: their @username (no @, case-insensitive) OR their numeric user id.
 # Value: a list of every way people write them. Get the id from /whois.
 EXTRA_NAMES: dict[str, list[str]] = {
-     "bellacia0o7": ["صادق", "صادخ", "sadegh", "sadekh"],
-     "Ezrail":   ["عزی", "ezi","عزرائیل"],
-    "ّ ":   ["داریوش", "darius","Darius","Dariush"],
-    "Morteza":  ["مری"],
-    "Zane": ["زنه","زین","رادمهر","radmehr"]
+    # "bellacia0o7": ["صادق", "صادخ", "sadegh", "sadekh"],
+    # "123456789":   ["حاج آقا", "hajagha"],
 }
 
 # a first name is a stronger signal than a surname when scores are close
@@ -214,6 +210,9 @@ def best_match(query: str, candidates: list[Candidate]):
     """Return (Candidate, score) or (None, best_score) if nothing is confident."""
     q = normalize(query)
     if not q or not candidates:
+        return None, 0.0
+    # a single letter matches half the group by accident
+    if len(q.replace(" ", "")) < 2:
         return None, 0.0
 
     handle = q.lstrip("@").replace(" ", "")
