@@ -73,6 +73,12 @@ def fa(number: int) -> str:
     return str(number).translate(_FA_DIGITS)
 
 
+def hours_left(seconds: float) -> str:
+    if seconds >= 3600:
+        return f"{fa(int(seconds // 3600))} ساعت"
+    return f"{fa(max(1, int(seconds // 60)))} دقیقه"
+
+
 # --------------------------------------------------------------- roster upkeep
 
 async def track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -307,16 +313,28 @@ async def on_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             label = query or BLANK
             log.info("no match for %r (best %.2f)", query, score)
 
+        # One vote per person per 24h. A vote annulled by lightning does not
+        # burn that allowance — it never counted, so it costs nothing.
+        already = None
         if not immune:
-            await asyncio.to_thread(roster.record_vote, chat_id, voter,
-                                    vote_key(target, label), label)
+            already = await asyncio.to_thread(roster.last_vote, chat_id, voter)
+            if already is None:
+                await asyncio.to_thread(roster.record_vote, chat_id, voter,
+                                        vote_key(target, label), label)
 
         photo_key = str(target.user_id) if (target and photo) else "-"
         await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_VIDEO)
         gif = await render(label[:MAX_CHARS], photo_key, photo, immune)
 
-        caption = (f"⚡️ رأی به «{label}» صاعقه زد و باطل شد"
-                   if immune else f"«{label}» با موفقیت ثبت شد ✅")
+        if immune:
+            caption = f"⚡️ رأی به «{label}» صاعقه زد و باطل شد"
+        elif already:
+            previous, remaining = already
+            caption = (f"«{label}» — ولی رأی شما امروز به «{previous}» ثبت شده "
+                       f"و این یکی شمرده نشد ⛔️\n"
+                       f"{hours_left(remaining)} دیگر دوباره می‌توانید رأی بدهید.")
+        else:
+            caption = f"«{label}» با موفقیت ثبت شد ✅"
         await message.reply_animation(animation=io.BytesIO(gif),
                                       filename="vote.gif", caption=caption)
     except Exception:
@@ -347,8 +365,7 @@ async def show_tally(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         rank = MEDALS[index] if index < 3 else f"{fa(index + 1)}."
         lines.append(f"{rank} {label} — {fa(count)} رأی")
 
-    total = sum(count for _, count in rows)
-    lines += ["", f"مجموع {fa(total)} رأی از {fa(voters)} نفر"]
+    lines += ["", f"مجموع {fa(voters)} نفر رأی داده‌اند"]
     if len(rows) > TOP_N:
         lines.append(f"({fa(len(rows) - TOP_N)} نفر دیگر هم رأی گرفتند)")
 
