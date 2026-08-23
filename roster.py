@@ -188,6 +188,21 @@ def record_vote(chat_id: int, voter_id: int, target_key: str,
         _db().commit()
 
 
+def last_vote(chat_id: int, voter_id: int, window: float = VOTE_WINDOW):
+    """(label, seconds_until_they_can_vote_again) or None if they are free."""
+    since = time.time() - window
+    with _lock:
+        row = _db().execute(
+            """SELECT label, ts FROM votes
+                WHERE chat_id=? AND voter_id=? AND ts >= ?
+             ORDER BY ts DESC LIMIT 1""",
+            (chat_id, voter_id, since),
+        ).fetchone()
+    if not row:
+        return None
+    return row[0], max(0.0, row[1] + window - time.time())
+
+
 def tally(chat_id: int, window: float = VOTE_WINDOW):
     """[(label, votes)] for the window, counting each voter once per target."""
     since = time.time() - window
