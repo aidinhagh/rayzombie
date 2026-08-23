@@ -19,7 +19,9 @@ import time
 from matching import Candidate
 
 DB_PATH = os.environ.get("DB_PATH", "roster.db")
-PHOTO_TTL = 24 * 3600          # re-check a user's avatar once a day
+PHOTO_TTL = 24 * 3600          # a known avatar is re-checked once a day
+PHOTO_MISS_TTL = 2 * 3600      # "no avatar" is retried much sooner — privacy
+                               # settings change, and people add photos
 
 _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
@@ -51,6 +53,19 @@ def _db() -> sqlite3.Connection:
             CREATE TABLE IF NOT EXISTS photo_blob (
                 unique_id TEXT PRIMARY KEY,
                 data      BLOB
+            );
+            CREATE TABLE IF NOT EXISTS votes (
+                chat_id    INTEGER NOT NULL,
+                ts         REAL NOT NULL,
+                voter_id   INTEGER NOT NULL,
+                target_key TEXT NOT NULL,
+                label      TEXT
+            );
+            CREATE INDEX IF NOT EXISTS votes_window
+                ON votes (chat_id, ts);
+            CREATE TABLE IF NOT EXISTS handles (
+                handle  TEXT PRIMARY KEY,
+                user_id INTEGER
             );
             """
         )
@@ -106,9 +121,21 @@ def forget(chat_id: int, user_id: int) -> None:
 
 def photo_is_fresh(user_id: int) -> bool:
     with _lock:
-        row = _db().execute("SELECT fetched FROM photo_meta WHERE user_id=?",
-                            (user_id,)).fetchone()
-    return bool(row) and (time.time() - (row[0] or 0)) < PHOTO_TTL
+        row = _db().execute(
+            "SELECT unique_id, fetched FROM photo_meta WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
+    if not row:
+        return False
+    ttl = PHOTO_TTL if row[0] else PHOTO_MISS_TTL
+    return (time.time() - (row[1] or 0)) < ttl
+
+
+def drop_photo(user_id: int) -> None:
+    """Forget what we know about a user's avatar, forcing a re-fetch."""
+    with _lock:
+        _db().execute("DELETE FROM photo_meta WHERE user_id=?", (user_id,))
+        _db().commit()
 
 
 def cached_photo(user_id: int) -> tuple[str | None, bytes | None]:
@@ -141,3 +168,64 @@ def store_photo(user_id: int, unique_id: str | None, data: bytes | None) -> None
                 (unique_id, data),
             )
         db.commit()
+
+
+# ------------------------------------------------------------------ vote log
+
+VOTE_WINDOW = 24 * 3600
+
+
+def record_vote(chat_id: int, voter_id: int, target_key: str,
+                label: str) -> None:
+    with _lock:
+        _db().execute(
+            "INSERT INTO votes (chat_id, ts, voter_id, target_key, label)"
+            " VALUES (?,?,?,?,?)",
+            (chat_id, time.time(), voter_id, target_key, label),
+        )
+        _db().execute("DELETE FROM votes WHERE ts < ?",
+                      (time.time() - 7 * 24 * 3600,))
+        _db().commit()
+
+
+def tally(chat_id: int, window: float = VOTE_WINDOW):
+    """[(label, votes)] for the window, counting each voter once per target."""
+    since = time.time() - window
+    with _lock:
+        rows = _db().execute(
+            """SELECT target_key,
+                      COUNT(DISTINCT voter_id) AS n,
+                      (SELECT label FROM votes v2
+                        WHERE v2.chat_id = v.chat_id
+                          AND v2.target_key = v.target_key
+                          AND v2.ts >= ?
+                        ORDER BY v2.ts DESC LIMIT 1) AS label
+                 FROM votes v
+                WHERE chat_id = ? AND ts >= ?
+             GROUP BY target_key
+             ORDER BY n DESC, label ASC""",
+            (since, chat_id, since),
+        ).fetchall()
+        voters = _db().execute(
+            "SELECT COUNT(DISTINCT voter_id) FROM votes WHERE chat_id=? AND ts>=?",
+            (chat_id, since),
+        ).fetchone()[0]
+    return [(row[2] or row[0], row[1]) for row in rows], voters
+
+
+# --------------------------------------------------------- @handle -> user id
+
+def known_handle(handle: str) -> int | None:
+    with _lock:
+        row = _db().execute("SELECT user_id FROM handles WHERE handle=?",
+                            (handle.lower(),)).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def store_handle(handle: str, user_id: int | None) -> None:
+    with _lock:
+        _db().execute(
+            "INSERT OR REPLACE INTO handles (handle, user_id) VALUES (?,?)",
+            (handle.lower(), user_id),
+        )
+        _db().commit()
