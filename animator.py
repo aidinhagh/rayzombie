@@ -341,6 +341,65 @@ def draw_shred(canvas, s, frame):
     paste_rotated(canvas, s["img"], cx, cy, s["spin"] * q)
 
 
+# ------------------------------------------------------------------ lightning
+
+def _bolt_points(rng, start_x: float, end_x: float, end_y: float, steps=8):
+    points = [(start_x, 0.0)]
+    for i in range(1, steps + 1):
+        t = i / steps
+        jitter = rng.uniform(-30, 30) * (1 - t) + rng.uniform(-7, 7)
+        points.append((start_x + (end_x - start_x) * t + jitter, end_y * t))
+    return points
+
+
+def draw_lightning(canvas: Image.Image, rng: random.Random, power: float) -> None:
+    """Storm-darken the frame, then strike into the top of the box.
+
+    The darkening is the point: a white bolt on a pale background is invisible,
+    so the strike has to bring its own night with it.
+    """
+    storm = Image.new("RGB", (W, H), (17, 24, 38))
+    darkened = Image.blend(canvas.convert("RGB"), storm, 0.55 * power)
+    canvas.paste(darkened.convert("RGBA"), (0, 0))
+
+    start = rng.uniform(W * 0.25, W * 0.75)
+    points = _bolt_points(rng, start, W / 2 + rng.uniform(-30, 30), BOX_Y + 6)
+    fork_at = rng.randrange(2, len(points) - 2)
+    fx, fy = points[fork_at]
+    branch = [(fx, fy)]
+    for i in range(1, 4):
+        branch.append((fx + rng.uniform(-46, 46) * i, fy + i * 26))
+
+    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(glow)
+    gd.line(points, fill=(120, 190, 255, 255), width=11, joint="curve")
+    gd.line(branch, fill=(120, 190, 255, 210), width=7, joint="curve")
+    canvas.alpha_composite(glow.filter(ImageFilter.GaussianBlur(9)))
+
+    core = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    cd = ImageDraw.Draw(core)
+    cd.line(points, fill=(238, 248, 255, 255), width=5, joint="curve")
+    cd.line(branch, fill=(238, 248, 255, 235), width=3, joint="curve")
+    cd.line(points, fill=(255, 255, 255, 255), width=2, joint="curve")
+    canvas.alpha_composite(core)
+
+    # light spilling onto the box lid where the bolt lands
+    spill = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(spill).ellipse(
+        [W / 2 - 120, BOX_Y - 60, W / 2 + 120, BOX_Y + 40],
+        fill=(170, 215, 255, int(90 * power)))
+    canvas.alpha_composite(spill.filter(ImageFilter.GaussianBlur(18)))
+
+
+def flash(canvas: Image.Image, strength: float) -> None:
+    """Afterglow frame: a dimmer echo of the strike."""
+    storm = Image.new("RGB", (W, H), (17, 24, 38))
+    canvas.paste(Image.blend(canvas.convert("RGB"), storm,
+                             0.30 * strength).convert("RGBA"), (0, 0))
+    canvas.alpha_composite(
+        Image.new("RGBA", (W, H), (200, 225, 255, int(60 * strength))))
+
+
 # ----------------------------------------------------------------- background
 
 def prepare_background(photo: bytes | None):
@@ -380,8 +439,10 @@ def prepare_background(photo: bytes | None):
 # ------------------------------------------------------------------- assembly
 
 def render_frames(word: str, seed: int | None = None,
-                  photo: bytes | None = None):
+                  photo: bytes | None = None, lightning: bool = False):
     rng = random.Random(seed)
+    bolt_frames = {T_INSERT[1] - 2, T_SHAKE[0] + 3, T_SHRED[0] + 1}
+    flash_frames = {f + 1 for f in bolt_frames} | {T_SHAKE[0] + 8, T_SHRED[0] + 9}
     backdrop = prepare_background(photo)
     blank = Image.new("RGBA", (W, H), BG + (255,))
     base = backdrop.convert("RGBA") if backdrop else blank
@@ -429,20 +490,26 @@ def render_frames(word: str, seed: int | None = None,
             for s in shreds:
                 draw_shred(canvas, s, f)
 
+        if lightning:
+            if f in bolt_frames:
+                draw_lightning(canvas, rng, 1.0 if f != T_SHRED[0] + 1 else 0.7)
+            elif f in flash_frames:
+                flash(canvas, 0.45)
+
         frames.append(canvas.convert("RGB"))
     return frames
 
 
-def make_gif(word: str, seed: int | None = None,
-             photo: bytes | None = None) -> bytes:
-    frames = render_frames(word, seed, photo)
+def make_gif(word: str, seed: int | None = None, photo: bytes | None = None,
+             lightning: bool = False) -> bytes:
+    frames = render_frames(word, seed, photo, lightning)
 
     # One shared palette for every frame. Per-frame palettes would force the
     # encoder to rewrite the whole canvas each time; with a common palette it
     # only stores the rectangle that actually changed, which matters a lot when
     # the background is a photo.
     master = frames[0].convert("P", palette=Image.ADAPTIVE,
-                               colors=128 if photo else 96)
+                               colors=128 if (photo or lightning) else 96)
     pal = [master] + [f.quantize(palette=master, dither=Image.Dither.NONE)
                       for f in frames[1:]]
 
