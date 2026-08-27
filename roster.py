@@ -188,6 +188,42 @@ def record_vote(chat_id: int, voter_id: int, target_key: str,
         _db().commit()
 
 
+def delete_votes_for(chat_id: int, target_key: str, label: str,
+                     window: float = VOTE_WINDOW) -> int:
+    """Remove every vote cast for one person inside the window."""
+    since = time.time() - window
+    with _lock:
+        cur = _db().execute(
+            """DELETE FROM votes
+                WHERE chat_id=? AND ts>=? AND (target_key=? OR label=?)""",
+            (chat_id, since, target_key, label),
+        )
+        _db().commit()
+        return cur.rowcount
+
+
+def delete_votes_by(chat_id: int, voter_id: int,
+                    window: float = VOTE_WINDOW) -> int:
+    """Remove a person's own vote, freeing them to vote again."""
+    since = time.time() - window
+    with _lock:
+        cur = _db().execute(
+            "DELETE FROM votes WHERE chat_id=? AND voter_id=? AND ts>=?",
+            (chat_id, voter_id, since),
+        )
+        _db().commit()
+        return cur.rowcount
+
+
+def clear_votes(chat_id: int, window: float = VOTE_WINDOW) -> int:
+    since = time.time() - window
+    with _lock:
+        cur = _db().execute("DELETE FROM votes WHERE chat_id=? AND ts>=?",
+                            (chat_id, since))
+        _db().commit()
+        return cur.rowcount
+
+
 def last_vote(chat_id: int, voter_id: int, window: float = VOTE_WINDOW):
     """(label, seconds_until_they_can_vote_again) or None if they are free."""
     since = time.time() - window
