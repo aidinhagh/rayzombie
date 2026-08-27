@@ -21,7 +21,7 @@ import time
 from collections import OrderedDict
 
 from telegram import MessageEntity, Update
-from telegram.constants import ChatAction, ChatType
+from telegram.constants import ChatAction, ChatMemberStatus, ChatType
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -58,6 +58,13 @@ CACHE_SIZE = 40
 BLANK = "رأی سفید"
 ADMIN_REFRESH = 6 * 3600
 TOP_N = 10
+VERSION = "2026-08-27.1"
+
+# A message older than this is history, not a new command. Reactions, edits and
+# any backlog Telegram replays after downtime all arrive attached to the
+# ORIGINAL message — without this, reacting to a week-old "#رای X" re-votes.
+MAX_MESSAGE_AGE = 120.0
+SEEN_LIMIT = 400
 
 _FA_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
 
@@ -67,6 +74,28 @@ _last_tally: dict[int, float] = {}
 _admins_seeded: dict[int, float] = {}
 _cache: "OrderedDict[str, bytes]" = OrderedDict()
 _render_slots = asyncio.Semaphore(2)
+_seen: "OrderedDict[tuple[int, int], float]" = OrderedDict()
+
+
+def is_stale(message) -> bool:
+    """True for anything that is not a freshly sent message."""
+    if message.edit_date is not None:
+        return True
+    # a forwarded "#رای X" is someone showing an old vote, not casting one
+    if getattr(message, "forward_origin", None) is not None:
+        return True
+    if message.date is not None:
+        age = time.time() - message.date.timestamp()
+        if age > MAX_MESSAGE_AGE:
+            return True
+
+    key = (message.chat_id, message.message_id)
+    if key in _seen:
+        return True
+    _seen[key] = time.time()
+    if len(_seen) > SEEN_LIMIT:
+        _seen.popitem(last=False)
+    return False
 
 
 def fa(number: int) -> str:
@@ -277,6 +306,11 @@ async def on_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not message:
         return
     text = message.text or message.caption or ""
+    if not (TALLY.search(text) or TRIGGER.search(text)):
+        return
+    if is_stale(message):
+        log.debug("ignoring stale/edited message %s", message.message_id)
+        return
 
     if TALLY.search(text):
         await show_tally(update, context)
@@ -378,7 +412,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         "منو به گروه اضافه کن و بنویس:\n"
         "#رای علی — رأی به یک نفر\n"
-        "#رایگیری — نتیجه ۲۴ ساعت گذشته\n\n"
+        "#رایگیری — نتیجه ۲۴ ساعت گذشته\n"
+        "/delete — فقط مالک گروه: حذف رأی\n\n"
         "اسم فارسی یا انگلیسی، کوتاه‌شده یا یوزرنیم — پیدا می‌کنم. 🗳️"
     )
 
@@ -444,6 +479,113 @@ async def photo_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+ANONYMOUS_ADMIN_ID = 1087968824      # @GroupAnonymousBot
+
+
+async def is_owner(bot, chat_id: int, user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+    except Exception as exc:
+        log.warning("get_chat_member failed in %s: %s", chat_id, exc)
+        return False
+    log.info("owner check in %s for %s -> %s", chat_id, user_id, member.status)
+    return member.status == ChatMemberStatus.OWNER
+
+
+async def delete_vote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/delete <name> | /delete all | (as a reply) /delete — owner only.
+
+    Two different deletions, both useful:
+      · by NAME   — drop every vote cast for that person
+      · by REPLY  — drop that person's own vote, so they can vote again
+    """
+    message = update.effective_message
+    chat_id = message.chat_id
+    log.info("/delete from %s in %s args=%r",
+             message.from_user.id if message.from_user else "?", chat_id,
+             context.args)
+
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.reply_text("این دستور فقط داخل گروه کار می‌کند.")
+        return
+
+    sender = message.from_user
+    if message.sender_chat or (sender and sender.id == ANONYMOUS_ADMIN_ID):
+        # Posting anonymously hides who you are, so ownership can't be checked.
+        await message.reply_text(
+            "پیام ناشناس فرستاده شده و نمی‌توانم مالک بودن را تأیید کنم.\n"
+            "لطفاً حالت ناشناس (Remain Anonymous) را موقتاً خاموش کن."
+        )
+        return
+    if not sender or not await is_owner(context.bot, chat_id, sender.id):
+        await message.reply_text("فقط مالک گروه می‌تواند رأی حذف کند. ⛔️")
+        return
+
+    query = " ".join(context.args or [])
+
+    if query.strip().lower() in ("all", "همه"):
+        removed = await asyncio.to_thread(roster.clear_votes, chat_id)
+        await message.reply_text(f"همهٔ {fa(removed)} رأی ۲۴ ساعت گذشته پاک شد. 🧹")
+        return
+
+    if message.reply_to_message and not query:
+        person = message.reply_to_message.from_user
+        removed = await asyncio.to_thread(roster.delete_votes_by, chat_id, person.id)
+        if removed:
+            await message.reply_text(
+                f"رأی {person.first_name} حذف شد — می‌تواند دوباره رأی بدهد. ✅"
+            )
+        else:
+            await message.reply_text(f"{person.first_name} در ۲۴ ساعت گذشته رأی نداده.")
+        return
+
+    if not query:
+        await message.reply_text(
+            "/delete <اسم> — حذف رأی‌های داده‌شده به یک نفر\n"
+            "/delete (ریپلای) — حذف رأی خودِ آن شخص\n"
+            "/delete all — پاک کردن کل ۲۴ ساعت"
+        )
+        return
+
+    target, score = best_match(query, await chat_candidates(chat_id))
+    label = (seed.display_for(target) or target.display) if target else query
+    key = vote_key(target, label)
+    removed = await asyncio.to_thread(roster.delete_votes_for, chat_id, key, label)
+
+    if removed:
+        await message.reply_text(f"{fa(removed)} رأی داده‌شده به «{label}» حذف شد. 🗑")
+    else:
+        await message.reply_text(f"رأیی به «{label}» در ۲۴ ساعت گذشته ثبت نشده.")
+
+
+async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/ping — is the deployed code the code you think it is?"""
+    message = update.effective_message
+    sender = message.from_user
+    owner = "—"
+    if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP) and sender:
+        owner = "بله" if await is_owner(context.bot, message.chat_id, sender.id) \
+                else "خیر"
+    await message.reply_text(
+        f"pong · نسخه {VERSION}\n"
+        f"مالک گروه: {owner}\n"
+        f"دستورها: /whois /photo /delete /result"
+    )
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Without this, a crash inside a handler is silent — the user just sees
+    nothing happen, which is exactly how /delete looked when it broke."""
+    log.exception("handler error on update: %s", update, exc_info=context.error)
+    try:
+        if isinstance(update, Update) and update.effective_message:
+            await update.effective_message.reply_text(
+                f"خطا در اجرای دستور: {type(context.error).__name__}"
+            )
+    except Exception:
+        pass
+
+
 def main() -> None:
     if not TOKEN:
         raise SystemExit("BOT_TOKEN is not set")
@@ -458,17 +600,27 @@ def main() -> None:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
     app = Application.builder().token(TOKEN).build()
-    app.add_handler(MessageHandler(filters.ALL, track), group=0)
+    fresh = filters.UpdateType.MESSAGE
+    app.add_handler(MessageHandler(filters.ALL & fresh, track), group=0)
     app.add_handler(CommandHandler(["start", "help"], start), group=1)
     app.add_handler(CommandHandler("whois", who), group=1)
     app.add_handler(CommandHandler("photo", photo_check), group=1)
     app.add_handler(CommandHandler(["result", "natije"], show_tally), group=1)
+    app.add_handler(CommandHandler("delete", delete_vote), group=1)
+    app.add_handler(CommandHandler("ping", ping), group=1)
     app.add_handler(
-        MessageHandler(filters.TEXT | filters.CAPTION, on_trigger), group=1
+        MessageHandler((filters.TEXT | filters.CAPTION) & fresh, on_trigger),
+        group=1,
     )
-    log.info("polling… roster db: %s, %d seeded people",
-             roster.DB_PATH, len(seed.PEOPLE))
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    app.add_error_handler(on_error)
+    log.info("polling… version %s, roster db: %s, %d seeded people",
+             VERSION, roster.DB_PATH, len(seed.PEOPLE))
+    # deliberately NOT Update.ALL_TYPES: message_reaction updates are noise
+    # here, and asking for them only invites the bug they caused.
+    app.run_polling(
+        allowed_updates=["message", "chat_member", "my_chat_member"],
+        drop_pending_updates=True,
+    )
 
 
 if __name__ == "__main__":
