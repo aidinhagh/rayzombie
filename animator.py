@@ -1,8 +1,13 @@
 """
-animator.py — builds the "vote goes in, confetti comes out" animation.
+animator.py — a name written in sand, washed away by a red tide.
 
-Pure Pillow: no ffmpeg, no system deps. Returns GIF bytes ready for
-Telegram's send_animation().
+Pure Pillow: no ffmpeg, no system deps. Returns GIF bytes ready for Telegram's
+send_animation().
+
+The sand is procedural (value noise), the letters are carved into it with an
+inset shadow and a lit rim, and the wash is a band with an irregular edge that
+sweeps down the frame: ahead of it the name is still there, behind it the sand
+is smooth and stained.
 """
 
 from __future__ import annotations
@@ -157,254 +162,121 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont:
 W, H = 420, 520
 FPS = 20
 
-BOX_W, BOX_H = 212, 140
-BOX_X = (W - BOX_W) // 2
-BOX_Y = 210
-BOX_BOTTOM = BOX_Y + BOX_H          # 350 — where the confetti sprays out
-LEG_H = 26
-FLOOR_Y = 478
+SAND_BASE = (211, 172, 116)
+SAND_DARK = (118, 87, 52)
+SAND_LIGHT = (252, 233, 190)
+SAND_SHADOW = (96, 70, 52)        # dune shadow, slightly cool against the sun
+SUN = (255, 236, 186)
+DUST = (255, 240, 208)
+BLOOD = (176, 20, 22)
+BLOOD_BRIGHT = (222, 44, 36)
+BLOOD_DARK = (104, 8, 14)
+STAIN = (126, 44, 38)
 
-SLOT_Y = BOX_Y - 5                  # the "swallow" line
-PAPER_W, PAPER_H = 170, 116
-PAPER_X = (W - PAPER_W) // 2
-PAPER_REST_Y = 96                   # centre y while the word is written
-
-COLS, ROWS = 12, 3                  # cross-cut shredder grid
-
-BG = (243, 240, 233)
-BOX_BODY = (47, 72, 88)
-BOX_LID = (34, 55, 68)
-BOX_EDGE = (28, 45, 56)
-INK = (30, 34, 41)
-PAPER = (255, 253, 246)
-PAPER_EDGE = (206, 199, 185)
-ACCENT = (198, 60, 60)
+TEXT_BOX = (W - 56, 190)          # room the name may occupy
 
 # ------------------------------------------------------------------- timeline
 
-T_DROP = (0, 4)         # sheet flutters into frame
-T_WRITE = (5, 26)       # the word gets written on it
-T_HOLD = (27, 33)
-T_INSERT = (34, 56)     # sheet is swallowed by the slot
-T_SHAKE = (57, 64)      # the box chews
-T_SHRED = (65, 98)      # confetti sprays out and falls
-T_END = 108
+T_SETTLE = (0, 3)
+T_WRITE = (4, 28)                 # the name is drawn into the sand
+T_HOLD = (29, 37)
+T_WASH = (38, 72)                 # the tide crosses the frame
+T_END = 94
 TOTAL = T_END + 1
 
-
-def _ease_out(p: float) -> float:
-    return 1 - (1 - p) ** 3
+BAND = 200                        # depth of the wash, in pixels
 
 
 def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
-# ------------------------------------------------------------------- the sheet
+# ----------------------------------------------------------------------- sand
 
-def _fit_font(text: str, max_w: int, max_h: int):
-    for size in range(38, 9, -1):
-        font = _load_font(size)
-        box = font.getbbox(text, **text_kwargs())
-        if (box[2] - box[0]) <= max_w and (box[3] - box[1]) <= max_h:
-            return font
-    return _load_font(10)
-
-
-def build_sheet(word: str):
-    """Return (blank_sheet, text_layer, text_x0, text_x1) — all RGBA."""
-    sheet = Image.new("RGBA", (PAPER_W, PAPER_H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(sheet)
-    d.rounded_rectangle([0, 0, PAPER_W - 1, PAPER_H - 1], radius=5,
-                        fill=PAPER + (255,), outline=PAPER_EDGE + (255,))
-    # a couple of faint ruled lines so it reads as a ballot
-    d.line([16, 20, PAPER_W - 16, 20], fill=(228, 222, 208, 255), width=2)
-    d.line([16, PAPER_H - 20, PAPER_W - 16, PAPER_H - 20],
-           fill=(228, 222, 208, 255), width=2)
-    d.rectangle([PAPER_W - 34, PAPER_H - 34, PAPER_W - 22, PAPER_H - 22],
-                outline=(196, 190, 176, 255), width=2)
-
-    visual = shape(word)
-    font = _fit_font(visual, PAPER_W - 30, PAPER_H - 46)
-
-    layer = Image.new("RGBA", (PAPER_W, PAPER_H), (0, 0, 0, 0))
-    ld = ImageDraw.Draw(layer)
-    ld.text((PAPER_W // 2, PAPER_H // 2 - 2), visual, font=font,
-            fill=INK + (255,), anchor="mm", **text_kwargs())
-
-    bbox = layer.getbbox() or (0, 0, PAPER_W, PAPER_H)
-    return sheet, layer, bbox[0], bbox[2]
+def _value_noise(rng: random.Random, size: tuple[int, int], cell: int,
+                 blur: float) -> Image.Image:
+    """Cheap smooth noise: random low-res image scaled up and blurred."""
+    small = Image.new("L", (max(2, size[0] // cell), max(2, size[1] // cell)))
+    small.putdata([rng.randrange(256) for _ in range(small.width * small.height)])
+    return small.resize(size, Image.BICUBIC).filter(ImageFilter.GaussianBlur(blur))
 
 
-def sheet_at(sheet, layer, x0, x1, progress: float) -> Image.Image:
-    """Sheet with the word revealed right-to-left (Persian writing order)."""
-    out = sheet.copy()
-    if progress <= 0:
-        return out
-    if progress >= 1:
-        out.alpha_composite(layer)
-        return out
+def _streak_noise(rng: random.Random, cols: int, rows: int,
+                  blur: float) -> Image.Image:
+    """Noise stretched along X: few columns, many rows, so features come out
+    wide and shallow — the ripple lines wind leaves across a dune."""
+    small = Image.new("L", (max(2, cols), max(2, rows)))
+    small.putdata([rng.randrange(256) for _ in range(small.width * small.height)])
+    return small.resize((W, H), Image.BICUBIC).filter(ImageFilter.GaussianBlur(blur))
 
-    cut = x1 - (x1 - x0) * progress
-    mask = Image.new("L", (PAPER_W, PAPER_H), 0)
-    ImageDraw.Draw(mask).rectangle([cut, 0, PAPER_W, PAPER_H], fill=255)
-    partial = layer.copy()
-    partial.putalpha(ImageChops.multiply(partial.split()[3], mask))
-    out.alpha_composite(partial)
+
+def _shift(img: Image.Image, dx: int, dy: int) -> Image.Image:
+    """Shift without wrapping. ImageChops.offset wraps around, which draws a
+    bright seam down two edges of every relief pass."""
+    out = img.copy()
+    out.paste(img, (dx, dy))
     return out
 
 
-# --------------------------------------------------------------------- the box
-
-def draw_scene(d: ImageDraw.ImageDraw, shake: float = 0.0) -> None:
-    dx = int(round(shake))
-    # floor + soft shadow
-    d.line([30, FLOOR_Y, W - 30, FLOOR_Y], fill=(222, 217, 205), width=3)
-    d.ellipse([BOX_X - 24, BOX_BOTTOM + LEG_H - 8,
-               BOX_X + BOX_W + 24, BOX_BOTTOM + LEG_H + 12],
-              fill=(230, 226, 214))
-
-    # legs
-    for lx in (BOX_X + 14, BOX_X + BOX_W - 32):
-        d.rounded_rectangle([lx + dx, BOX_BOTTOM - 4, lx + 18 + dx,
-                             BOX_BOTTOM + LEG_H], radius=4, fill=BOX_EDGE)
-
-    # body
-    d.rounded_rectangle([BOX_X + dx, BOX_Y, BOX_X + BOX_W + dx, BOX_BOTTOM],
-                        radius=10, fill=BOX_BODY)
-    # front panel: a little ballot icon
-    px, py = BOX_X + BOX_W // 2 - 30 + dx, BOX_Y + 40
-    d.rounded_rectangle([px, py, px + 60, py + 62], radius=5, fill=(238, 235, 228))
-    d.line([px + 10, py + 14, px + 50, py + 14], fill=(190, 185, 174), width=3)
-    d.line([px + 10, py + 26, px + 50, py + 26], fill=(190, 185, 174), width=3)
-    d.line([px + 14, py + 44, px + 24, py + 54], fill=ACCENT, width=4)
-    d.line([px + 24, py + 54, px + 46, py + 34], fill=ACCENT, width=4)
-
-    # output mouth
-    d.rounded_rectangle([BOX_X + 20 + dx, BOX_BOTTOM - 12,
-                         BOX_X + BOX_W - 20 + dx, BOX_BOTTOM - 2],
-                        radius=4, fill=(20, 32, 40))
-
-    # lid + input slot
-    d.rounded_rectangle([BOX_X - 10 + dx, BOX_Y - 18, BOX_X + BOX_W + 10 + dx,
-                         BOX_Y + 8], radius=7, fill=BOX_LID)
-    d.rounded_rectangle([W // 2 - 90 + dx, SLOT_Y - 5, W // 2 + 90 + dx,
-                         SLOT_Y + 5], radius=5, fill=(14, 22, 28))
+def _relief(height: Image.Image, base: Image.Image, dx: int, dy: int,
+            light: float, shade: float) -> Image.Image:
+    """Light a height field from the top-left, the way a low sun rakes dunes."""
+    lit = ImageChops.subtract(height, _shift(height, dx, dy), scale=1, offset=128)
+    highlight = lit.point(lambda v: int(min(255, max(0, v - 128) * light)))
+    shadow = lit.point(lambda v: int(min(255, max(0, 128 - v) * shade)))
+    out = Image.composite(Image.new("RGB", (W, H), SAND_LIGHT), base, highlight)
+    return Image.composite(Image.new("RGB", (W, H), SAND_SHADOW), out, shadow)
 
 
-# ----------------------------------------------------------------- the shreds
+def build_sand(rng: random.Random, photo: Image.Image | None = None) -> Image.Image:
+    """Desert floor: dunes lit by a low sun, wind ripples, grit and glare."""
+    base = Image.new("RGB", (W, H), SAND_BASE)
 
-def build_shreds(full_sheet: Image.Image, rng: random.Random):
-    xs = [round(i * PAPER_W / COLS) for i in range(COLS + 1)]
-    ys = [round(j * PAPER_H / ROWS) for j in range(ROWS + 1)]
-    shreds = []
-    for r in range(ROWS):
-        for c in range(COLS):
-            piece = full_sheet.crop((xs[c], ys[r], xs[c + 1], ys[r + 1]))
-            shreds.append({
-                "img": piece,
-                "x": PAPER_X + xs[c],
-                "start": T_SHRED[0] + r * 4 + rng.randint(0, 3),
-                "drift": rng.uniform(-72, 72),
-                "spin": rng.uniform(-190, 190),
-                "land": rng.uniform(404, 468),
-                "sway": rng.uniform(0.18, 0.42),
-            })
-    return shreds
+    # 1. dunes — big slow height field, raked by the sun from the upper left
+    dunes = _value_noise(rng, (W, H), 78, 24)
+    base = _relief(dunes, base, 7, 7, 2.4, 2.8)
 
+    # 2. wind ripples — stretched horizontally, much finer, shallower relief
+    ripples = _streak_noise(rng, 26, 105, 1.3)
+    base = _relief(ripples, base, 2, 3, 1.5, 1.8)
 
-def paste_rotated(canvas, img, cx, cy, angle):
-    rot = img.rotate(angle, expand=True, resample=Image.BICUBIC)
-    canvas.alpha_composite(rot, (int(cx - rot.width / 2), int(cy - rot.height / 2)))
+    fine_ripples = _streak_noise(rng, 44, 190, 0.7)
+    base = _relief(fine_ripples, base, 1, 2, 0.7, 0.85)
 
+    # broad tonal drift, so the surface is not one flat colour edge to edge
+    patches = _value_noise(rng, (W, H), 120, 40)
+    base = Image.composite(Image.new("RGB", (W, H), (190, 150, 98)), base,
+                           patches.point(lambda v: int(max(0, v - 118) * 0.75)))
+    base = Image.composite(Image.new("RGB", (W, H), (238, 214, 168)), base,
+                           patches.point(lambda v: int(max(0, 118 - v) * 0.70)))
 
-def draw_shred(canvas, s, frame):
-    t = frame - s["start"]
-    if t < 0:
-        return
-    w, h = s["img"].size
-    extrude = 4
-    fall = 18
+    if photo is not None:
+        base = Image.blend(base, photo, 0.30)
 
-    if t < extrude:                       # sliding out of the mouth
-        p = (t + 1) / extrude
-        vis = max(1, int(h * p))
-        part = s["img"].crop((0, h - vis, w, h))
-        canvas.alpha_composite(part, (int(s["x"]), BOX_BOTTOM - 6))
-        return
+    # 3. grit: coarse grains, then scattered dark specks of grit and pebble
+    grain = _value_noise(rng, (W, H), 3, 0.35)
+    base = Image.composite(Image.new("RGB", (W, H), SAND_DARK), base,
+                           grain.point(lambda v: int(v * 0.16)))
+    speck = _value_noise(rng, (W, H), 2, 0.2)
+    base = Image.composite(Image.new("RGB", (W, H), (78, 58, 40)), base,
+                           speck.point(lambda v: 255 if v > 243 else 0))
 
-    q = _clamp01((t - extrude) / fall)
-    g = q * q                              # gravity
-    y0 = BOX_BOTTOM - 6 + h / 2
-    cy = y0 + (s["land"] - y0) * g
-    cx = s["x"] + w / 2 + s["drift"] * q + math.sin(q * 7) * s["sway"] * 14
-    paste_rotated(canvas, s["img"], cx, cy, s["spin"] * q)
+    # 4. sunlight pouring in from the top-left corner
+    glare = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(glare).ellipse([-W * 0.9, -H * 0.8, W * 0.85, H * 0.55],
+                                  fill=120)
+    glare = glare.filter(ImageFilter.GaussianBlur(110))
+    base = Image.composite(Image.new("RGB", (W, H), SUN), base, glare)
+
+    # 5. the far corner falls into shadow
+    shade = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(shade).ellipse([W * 0.35, H * 0.5, W * 1.9, H * 1.7], fill=175)
+    shade = shade.filter(ImageFilter.GaussianBlur(120))
+    return Image.composite(Image.new("RGB", (W, H), (132, 98, 68)), base, shade)
 
 
-# ------------------------------------------------------------------ lightning
-
-def _bolt_points(rng, start_x: float, end_x: float, end_y: float, steps=8):
-    points = [(start_x, 0.0)]
-    for i in range(1, steps + 1):
-        t = i / steps
-        jitter = rng.uniform(-30, 30) * (1 - t) + rng.uniform(-7, 7)
-        points.append((start_x + (end_x - start_x) * t + jitter, end_y * t))
-    return points
-
-
-def draw_lightning(canvas: Image.Image, rng: random.Random, power: float) -> None:
-    """Storm-darken the frame, then strike into the top of the box.
-
-    The darkening is the point: a white bolt on a pale background is invisible,
-    so the strike has to bring its own night with it.
-    """
-    storm = Image.new("RGB", (W, H), (17, 24, 38))
-    darkened = Image.blend(canvas.convert("RGB"), storm, 0.55 * power)
-    canvas.paste(darkened.convert("RGBA"), (0, 0))
-
-    start = rng.uniform(W * 0.25, W * 0.75)
-    points = _bolt_points(rng, start, W / 2 + rng.uniform(-30, 30), BOX_Y + 6)
-    fork_at = rng.randrange(2, len(points) - 2)
-    fx, fy = points[fork_at]
-    branch = [(fx, fy)]
-    for i in range(1, 4):
-        branch.append((fx + rng.uniform(-46, 46) * i, fy + i * 26))
-
-    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    gd = ImageDraw.Draw(glow)
-    gd.line(points, fill=(120, 190, 255, 255), width=11, joint="curve")
-    gd.line(branch, fill=(120, 190, 255, 210), width=7, joint="curve")
-    canvas.alpha_composite(glow.filter(ImageFilter.GaussianBlur(9)))
-
-    core = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    cd = ImageDraw.Draw(core)
-    cd.line(points, fill=(238, 248, 255, 255), width=5, joint="curve")
-    cd.line(branch, fill=(238, 248, 255, 235), width=3, joint="curve")
-    cd.line(points, fill=(255, 255, 255, 255), width=2, joint="curve")
-    canvas.alpha_composite(core)
-
-    # light spilling onto the box lid where the bolt lands
-    spill = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    ImageDraw.Draw(spill).ellipse(
-        [W / 2 - 120, BOX_Y - 60, W / 2 + 120, BOX_Y + 40],
-        fill=(170, 215, 255, int(90 * power)))
-    canvas.alpha_composite(spill.filter(ImageFilter.GaussianBlur(18)))
-
-
-def flash(canvas: Image.Image, strength: float) -> None:
-    """Afterglow frame: a dimmer echo of the strike."""
-    storm = Image.new("RGB", (W, H), (17, 24, 38))
-    canvas.paste(Image.blend(canvas.convert("RGB"), storm,
-                             0.30 * strength).convert("RGBA"), (0, 0))
-    canvas.alpha_composite(
-        Image.new("RGBA", (W, H), (200, 225, 255, int(60 * strength))))
-
-
-# ----------------------------------------------------------------- background
-
-def prepare_background(photo: bytes | None):
-    """Turn a profile photo into a backdrop that never fights the foreground:
-    cropped to fill, blurred, desaturated and washed toward the paper colour."""
+def prepare_background(photo: bytes | None) -> Image.Image | None:
+    """A profile photo, softened enough to survive being buried in sand."""
     if not photo:
         return None
     try:
@@ -419,80 +291,322 @@ def prepare_background(photo: bytes | None):
     top = (img.height - H) // 2
     img = img.crop((left, top, left + W, top + H))
 
-    img = img.filter(ImageFilter.GaussianBlur(6))
-    img = ImageEnhance.Color(img).enhance(0.5)
-    img = ImageEnhance.Contrast(img).enhance(0.85)
-    img = Image.blend(img, Image.new("RGB", (W, H), BG), 0.55)
+    img = img.filter(ImageFilter.GaussianBlur(3))
+    img = ImageEnhance.Color(img).enhance(0.25)
+    img = ImageEnhance.Contrast(img).enhance(0.8)
+    return Image.blend(img, Image.new("RGB", (W, H), SAND_BASE), 0.45)
 
-    # fewer distinct colours in the backdrop => much smaller GIF
-    img = img.quantize(colors=48, method=Image.MEDIANCUT).convert("RGB")
 
-    # soft top-down scrim so the ballot stays readable over busy photos
-    column = Image.new("L", (1, H))
-    for y in range(H):
-        column.putpixel((0, y), int(105 * max(0.0, 1 - y / 300) ** 1.4))
-    scrim = Image.new("RGBA", (W, H), BG + (255,))
-    scrim.putalpha(column.resize((W, H), Image.BILINEAR))
-    return Image.alpha_composite(img.convert("RGBA"), scrim).convert("RGB")
+def build_stain(rng: random.Random, clean: Image.Image) -> Image.Image:
+    """Sand the tide has already crossed: darker, wet, streaked with red."""
+    wet = ImageEnhance.Brightness(clean).enhance(0.84)
+    wet = Image.blend(wet, Image.new("RGB", (W, H), STAIN), 0.15)
+
+    # streaks left by the water draining away
+    streaks = _value_noise(rng, (W * 3, H), 6, 1.3).resize((W, H), Image.BICUBIC)
+    wet = Image.composite(Image.new("RGB", (W, H), (104, 22, 26)), wet,
+                          streaks.point(lambda v: int(min(255, max(0, v - 168) * 1.6))))
+
+    patches = _value_noise(rng, (W, H), 30, 9)
+    return Image.composite(Image.new("RGB", (W, H), (96, 48, 42)), wet,
+                           patches.point(lambda v: int(max(0, v - 178) * 0.8)))
+
+
+# ------------------------------------------------------------- carved letters
+
+def _fit_font(text: str, max_w: int, max_h: int):
+    for size in range(86, 13, -1):
+        font = _load_font(size)
+        box = font.getbbox(text, **text_kwargs())
+        if (box[2] - box[0]) <= max_w and (box[3] - box[1]) <= max_h:
+            return font
+    return _load_font(14)
+
+
+def build_name(word: str):
+    """(carved_layer, x0, x1) — the name as it appears cut into the sand."""
+    visual = shape(word)
+    font = _fit_font(visual, *TEXT_BOX)
+
+    mask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(mask).text((W // 2, H // 2), visual, font=font, fill=255,
+                              anchor="mm", **text_kwargs())
+
+    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+
+    # groove: dark core, offset down-right; lit rim offset up-left
+    rim = ImageChops.subtract(mask, ImageChops.offset(mask, -4, -4))
+    shadow = ImageChops.subtract(mask, ImageChops.offset(mask, 4, 4))
+
+    # sand pushed out of the groove piles along the edges
+    ridge = ImageChops.subtract(ImageChops.offset(mask, -5, -5), mask)
+    pile = Image.new("RGBA", (W, H), SAND_LIGHT + (150,))
+    pile.putalpha(ImageChops.multiply(pile.split()[3],
+                                      ridge.filter(ImageFilter.GaussianBlur(3))))
+    layer.alpha_composite(pile)
+
+    core = Image.new("RGBA", (W, H), (118, 90, 58) + (235,))
+    core.putalpha(ImageChops.multiply(core.split()[3],
+                                      mask.filter(ImageFilter.GaussianBlur(0.6))))
+    layer.alpha_composite(core)
+
+    lit = Image.new("RGBA", (W, H), (252, 241, 219) + (230,))
+    lit.putalpha(ImageChops.multiply(lit.split()[3],
+                                     rim.filter(ImageFilter.GaussianBlur(1.1))))
+    layer.alpha_composite(lit)
+
+    deep = Image.new("RGBA", (W, H), (74, 54, 34, 205))
+    deep.putalpha(ImageChops.multiply(deep.split()[3],
+                                      shadow.filter(ImageFilter.GaussianBlur(1.4))))
+    layer.alpha_composite(deep)
+
+    box = mask.getbbox() or (0, 0, W, H)
+    return layer, box[0], box[2]
+
+
+def name_at(layer: Image.Image, x0: int, x1: int, progress: float):
+    """Reveal the name right-to-left, the way it is written."""
+    if progress >= 1:
+        return layer
+    if progress <= 0:
+        return None
+    cut = x1 - (x1 - x0) * progress
+    mask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(mask).rectangle([cut, 0, W, H], fill=255)
+    out = layer.copy()
+    out.putalpha(ImageChops.multiply(out.split()[3],
+                                     mask.filter(ImageFilter.GaussianBlur(2))))
+    return out
+
+
+# ----------------------------------------------------------------- airborne
+
+def build_dust(rng: random.Random):
+    """Grit blowing across the lens: many fine motes, a few near-camera blurs."""
+    motes = []
+    for _ in range(52):
+        motes.append({
+            "x": rng.uniform(-30, W + 30), "y": rng.uniform(-30, H + 30),
+            "r": rng.uniform(0.7, 2.4), "a": rng.randint(50, 130),
+            "vx": rng.uniform(1.0, 3.2), "vy": rng.uniform(-0.45, 0.55),
+            "amp": rng.uniform(2, 9), "ph": rng.uniform(0, math.tau),
+            "big": False,
+        })
+    for _ in range(7):
+        motes.append({
+            "x": rng.uniform(-30, W + 30), "y": rng.uniform(-30, H + 30),
+            "r": rng.uniform(4.5, 10.0), "a": rng.randint(26, 52),
+            "vx": rng.uniform(0.4, 1.3), "vy": rng.uniform(-0.3, 0.35),
+            "amp": rng.uniform(4, 13), "ph": rng.uniform(0, math.tau),
+            "big": True,
+        })
+    return motes
+
+
+def draw_dust(canvas: Image.Image, motes, frame: int) -> None:
+    near = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    far = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    nd, fd = ImageDraw.Draw(near), ImageDraw.Draw(far)
+
+    for m in motes:
+        x = (m["x"] + m["vx"] * frame) % (W + 60) - 30
+        y = (m["y"] + m["vy"] * frame
+             + m["amp"] * math.sin(frame * 0.17 + m["ph"])) % (H + 60) - 30
+        r = m["r"]
+        box = [x - r, y - r, x + r, y + r]
+        (nd if m["big"] else fd).ellipse(box, fill=DUST + (m["a"],))
+
+    near = near.filter(ImageFilter.GaussianBlur(3.5))
+    canvas.paste(near, (0, 0), near)
+    canvas.paste(far, (0, 0), far)
+
+
+# ----------------------------------------------------------------- the wash
+
+def _edge_profile(rng: random.Random):
+    """A repeatable wobble, so the tide edge is never a straight line."""
+    phase = [rng.uniform(0, math.tau) for _ in range(4)]
+    bumps = [(rng.uniform(0, W), rng.uniform(18, 46), rng.uniform(26, 70))
+             for _ in range(5)]
+
+    def offset(x: float) -> float:
+        value = (13 * math.sin(x / 41 + phase[0])
+                 + 7 * math.sin(x / 17 + phase[1])
+                 + 4 * math.sin(x / 7 + phase[2]))
+        for cx, depth, width in bumps:            # longer runs, like fingers
+            value += depth * math.exp(-((x - cx) / width) ** 2)
+        return value
+
+    return offset
+
+
+def _band_polygon(edge, y_at, top: bool):
+    points = []
+    for x in range(-10, W + 12, 6):
+        points.append((x, y_at + edge(x)))
+    if top:
+        points = [(W + 12, -H)] + points[::-1] + [(-10, -H)]
+    return points
+
+
+def draw_wash(canvas: Image.Image, clean: Image.Image, front_y: float,
+              back_y: float, front_edge, back_edge) -> None:
+    """Paint one frame of the tide: clean sand behind it, blood in the band."""
+    if back_y > -H:
+        mask = Image.new("L", (W, H), 0)
+        ImageDraw.Draw(mask).polygon(_band_polygon(back_edge, back_y, True),
+                                     fill=255)
+        canvas.paste(clean, (0, 0), mask.filter(ImageFilter.GaussianBlur(1.2)))
+
+    if front_y < -20:
+        return
+
+    band = Image.new("L", (W, H), 0)
+    bd = ImageDraw.Draw(band)
+    bd.polygon(_band_polygon(front_edge, front_y, True), fill=255)
+    bd.polygon(_band_polygon(back_edge, back_y, True), fill=0)
+    band = band.filter(ImageFilter.GaussianBlur(1.0))
+
+    fill = Image.new("RGB", (W, H), BLOOD)
+    sheen = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(sheen).polygon(_band_polygon(front_edge, front_y - 26, True),
+                                  fill=90)
+    fill = Image.composite(Image.new("RGB", (W, H), BLOOD_DARK), fill,
+                           sheen.filter(ImageFilter.GaussianBlur(14)))
+
+    lead = Image.new("L", (W, H), 0)
+    ld = ImageDraw.Draw(lead)
+    ld.polygon(_band_polygon(front_edge, front_y, True), fill=255)
+    ld.polygon(_band_polygon(front_edge, front_y - 11, True), fill=0)
+    fill = Image.composite(Image.new("RGB", (W, H), BLOOD_BRIGHT), fill,
+                           lead.filter(ImageFilter.GaussianBlur(2)))
+
+    # wet gloss: a soft specular streak a little behind the leading edge
+    gloss = Image.new("L", (W, H), 0)
+    gd = ImageDraw.Draw(gloss)
+    gd.polygon(_band_polygon(front_edge, front_y - 26, True), fill=78)
+    gd.polygon(_band_polygon(front_edge, front_y - 48, True), fill=0)
+    fill = Image.composite(Image.new("RGB", (W, H), (228, 78, 62)), fill,
+                           gloss.filter(ImageFilter.GaussianBlur(12)))
+
+    canvas.paste(fill, (0, 0), band)
+
+
+def draw_droplets(canvas: Image.Image, drops, front_y: float, back_y: float,
+                  front_edge, back_edge) -> None:
+    """Spatter thrown ahead of the tide, and what it leaves behind."""
+    d = ImageDraw.Draw(canvas, "RGBA")
+    for x, ahead, radius in drops:
+        lead = front_y + front_edge(x)
+        tail = back_y + back_edge(x)
+
+        y = lead + ahead
+        if -10 < y < H + 10:
+            d.ellipse([x - radius, y - radius * 0.75,
+                       x + radius, y + radius * 0.75], fill=BLOOD + (230,))
+
+        settled = tail - ahead * 0.6
+        if -10 < settled < H + 10 and settled < tail:
+            r = radius * 1.5
+            d.ellipse([x - r, settled - r * 0.6, x + r, settled + r * 0.6],
+                      fill=(96, 20, 24, 150))
+
+
+# ------------------------------------------------------------------ lightning
+
+def _bolt_points(rng, start_x: float, end_x: float, end_y: float, steps=8):
+    points = [(start_x, 0.0)]
+    for i in range(1, steps + 1):
+        t = i / steps
+        jitter = rng.uniform(-30, 30) * (1 - t) + rng.uniform(-7, 7)
+        points.append((start_x + (end_x - start_x) * t + jitter, end_y * t))
+    return points
+
+
+def draw_lightning(canvas: Image.Image, rng: random.Random, power: float) -> None:
+    """Storm-darken the frame, then strike the sand. The darkening is the
+    point: a white bolt on pale sand is invisible."""
+    storm = Image.new("RGB", (W, H), (17, 22, 34))
+    canvas.paste(Image.blend(canvas.convert("RGB"), storm, 0.55 * power), (0, 0))
+
+    start = rng.uniform(W * 0.25, W * 0.75)
+    points = _bolt_points(rng, start, W / 2 + rng.uniform(-30, 30), H * 0.62)
+    fork_at = rng.randrange(2, len(points) - 2)
+    fx, fy = points[fork_at]
+    branch = [(fx, fy)]
+    for i in range(1, 4):
+        branch.append((fx + rng.uniform(-46, 46) * i, fy + i * 26))
+
+    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(glow)
+    gd.line(points, fill=(120, 190, 255, 255), width=11, joint="curve")
+    gd.line(branch, fill=(120, 190, 255, 210), width=7, joint="curve")
+    canvas.paste(Image.alpha_composite(
+        canvas.convert("RGBA"), glow.filter(ImageFilter.GaussianBlur(9))
+    ).convert("RGB"), (0, 0))
+
+    core = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    cd = ImageDraw.Draw(core)
+    cd.line(points, fill=(238, 248, 255, 255), width=5, joint="curve")
+    cd.line(branch, fill=(238, 248, 255, 235), width=3, joint="curve")
+    cd.line(points, fill=(255, 255, 255, 255), width=2, joint="curve")
+    canvas.paste(Image.alpha_composite(canvas.convert("RGBA"), core).convert("RGB"),
+                 (0, 0))
+
+
+def flash(canvas: Image.Image, strength: float) -> None:
+    storm = Image.new("RGB", (W, H), (17, 22, 34))
+    canvas.paste(Image.blend(canvas.convert("RGB"), storm, 0.30 * strength), (0, 0))
 
 
 # ------------------------------------------------------------------- assembly
 
 def render_frames(word: str, seed: int | None = None,
                   photo: bytes | None = None, lightning: bool = False):
-    rng = random.Random(seed)
-    bolt_frames = {T_INSERT[1] - 2, T_SHAKE[0] + 3, T_SHRED[0] + 1}
-    flash_frames = {f + 1 for f in bolt_frames} | {T_SHAKE[0] + 8, T_SHRED[0] + 9}
-    backdrop = prepare_background(photo)
-    blank = Image.new("RGBA", (W, H), BG + (255,))
-    base = backdrop.convert("RGBA") if backdrop else blank
-    sheet, layer, x0, x1 = build_sheet(word)
-    full = sheet_at(sheet, layer, x0, x1, 1.0)
-    shreds = build_shreds(full, rng)
+    rng = random.Random(seed if seed is not None else 0)
 
+    backdrop = prepare_background(photo)
+    clean = build_sand(random.Random(11), backdrop)
+    stained = build_stain(random.Random(23), clean)
+
+    layer, x0, x1 = build_name(word)
+    written = clean.copy()
+    written.paste(layer, (0, 0), layer)
+
+    front_edge = _edge_profile(random.Random(5))
+    back_edge = _edge_profile(random.Random(6))
+    drops = [(rng.uniform(0, W), rng.uniform(10, 90), rng.uniform(2.5, 7.0))
+             for _ in range(26)]
+    motes = build_dust(random.Random(31))
+
+    bolt_frames = {T_HOLD[0] + 2, T_WASH[0] + 1, T_WASH[0] + 14}
+    flash_frames = {f + 1 for f in bolt_frames}
+
+    span = H + BAND + 150
     frames = []
     for f in range(TOTAL):
-        canvas = base.copy()
-        d = ImageDraw.Draw(canvas)
+        if f <= T_WRITE[1]:
+            canvas = clean.copy()
+            progress = _clamp01((f - T_WRITE[0] + 1) /
+                                (T_WRITE[1] - T_WRITE[0] + 1))
+            partial = name_at(layer, x0, x1, progress)
+            if partial is not None:
+                canvas.paste(partial, (0, 0), partial)
+        else:
+            canvas = written.copy()
 
-        shake = 0.0
-        if T_SHAKE[0] <= f <= T_SHRED[1]:
-            decay = max(0.0, 1 - (f - T_SHAKE[0]) / 26)
-            shake = math.sin(f * 2.1) * 4.5 * decay
-        draw_scene(d, shake)
+        if f >= T_WASH[0]:
+            p = _clamp01((f - T_WASH[0]) / (T_WASH[1] - T_WASH[0]))
+            front_y = -70 + p * span
+            back_y = front_y - BAND
+            draw_wash(canvas, stained, front_y, back_y, front_edge, back_edge)
+            draw_droplets(canvas, drops, front_y, back_y, front_edge, back_edge)
 
-        # --- the sheet, phase by phase
-        if f <= T_INSERT[1]:
-            if f <= T_DROP[1]:
-                p = _ease_out((f + 1) / (T_DROP[1] - T_DROP[0] + 1))
-                cy = 24 + (PAPER_REST_Y - 24) * p
-                reveal = 0.0
-            elif f <= T_WRITE[1]:
-                cy = PAPER_REST_Y
-                reveal = _clamp01((f - T_WRITE[0] + 1) /
-                                  (T_WRITE[1] - T_WRITE[0] + 1))
-            elif f <= T_HOLD[1]:
-                cy, reveal = PAPER_REST_Y, 1.0
-            else:
-                p = ((f - T_INSERT[0]) / (T_INSERT[1] - T_INSERT[0])) ** 1.55
-                cy = PAPER_REST_Y + (SLOT_Y + PAPER_H / 2 + 6 - PAPER_REST_Y) * p
-                reveal = 1.0
-
-            img = sheet_at(sheet, layer, x0, x1, reveal)
-            top = int(cy - PAPER_H / 2)
-            visible = SLOT_Y - top          # only what is above the slot shows
-            if visible > 0:
-                canvas.alpha_composite(img.crop((0, 0, PAPER_W, min(PAPER_H, visible))),
-                                       (PAPER_X, top))
-
-        # --- confetti
-        if f >= T_SHRED[0]:
-            for s in shreds:
-                draw_shred(canvas, s, f)
+        draw_dust(canvas, motes, f)
 
         if lightning:
             if f in bolt_frames:
-                draw_lightning(canvas, rng, 1.0 if f != T_SHRED[0] + 1 else 0.7)
+                draw_lightning(canvas, rng, 1.0)
             elif f in flash_frames:
                 flash(canvas, 0.45)
 
@@ -504,12 +618,10 @@ def make_gif(word: str, seed: int | None = None, photo: bytes | None = None,
              lightning: bool = False) -> bytes:
     frames = render_frames(word, seed, photo, lightning)
 
-    # One shared palette for every frame. Per-frame palettes would force the
-    # encoder to rewrite the whole canvas each time; with a common palette it
-    # only stores the rectangle that actually changed, which matters a lot when
-    # the background is a photo.
-    master = frames[0].convert("P", palette=Image.ADAPTIVE,
-                               colors=128 if (photo or lightning) else 96)
+    # One shared palette for every frame: with per-frame palettes the encoder
+    # has to rewrite the whole canvas each time, which is ruinous for a grainy
+    # sand texture that barely changes.
+    master = frames[0].convert("P", palette=Image.ADAPTIVE, colors=110)
     pal = [master] + [f.quantize(palette=master, dither=Image.Dither.NONE)
                       for f in frames[1:]]
 
@@ -528,5 +640,5 @@ if __name__ == "__main__":
     data = make_gif(text, seed=7)
     with open("preview.gif", "wb") as fh:
         fh.write(data)
-    print(f"still.png — check the word here")
+    print("still.png — check the word here")
     print(f"preview.gif — {len(data) / 1024:.0f} KB")
