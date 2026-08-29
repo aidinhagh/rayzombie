@@ -17,7 +17,7 @@ import matching
 PEOPLE: list[tuple[str, list[str], bool]] = [
     ("informer_mohammad",     ["اینفرمر", "ممد", "محمد پیروز", "درخراب",
                                "informer", "mohammad"], False),
-    ("theforgottendreamer74", ["محو", "شتر", "mahv", "shotor"], True),
+    ("theforgottendreamer74", ["محو", "شتر", "mahv", "shotor"], False),
     ("astromasoud",           ["مسعود", "masoud"], False),
     ("meysam_khaan",          ["میثم", "meysam", "میثم خان"], False),
     ("ezi110",                ["عزی", "عزرائیل", "ezi", "ezrail"], False),
@@ -32,7 +32,7 @@ PEOPLE: list[tuple[str, list[str], bool]] = [
     ("farazfe",               ["فراز", "faraz"], False),
     ("527341236",             ["داریوش", "dariush"], False),
     ("109009789",             ["سیاوش", "siavash"], False),
-    ("aidinhagh",             ["آیدین", "ایدین", "aidin", "aydin"], False),
+    ("aidinhagh",             ["آیدین", "ایدین", "aidin", "aydin"], True),
 ]
 
 
