@@ -17,19 +17,23 @@ import io
 import logging
 import os
 import re
+import secrets
 import time
 from collections import OrderedDict
 
-from telegram import MessageEntity, Update
+from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
+                      MessageEntity, Update)
 from telegram.constants import ChatAction, ChatMemberStatus, ChatType
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
     filters,
 )
 
+import duel
 import matching
 import roster
 import seed
@@ -413,6 +417,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "منو به گروه اضافه کن و بنویس:\n"
         "#رای علی — رأی به یک نفر\n"
         "#رایگیری — نتیجه ۲۴ ساعت گذشته\n"
+        "/duel — مبارزه: حمله / دفاع / حیله\n"
         "/delete — فقط مالک گروه: حذف رأی\n\n"
         "اسم فارسی یا انگلیسی، کوتاه‌شده یا یوزرنیم — پیدا می‌کنم. 🗳️"
     )
@@ -586,6 +591,237 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         pass
 
 
+
+
+# =========================================================== attack/defend/trick
+
+DUEL_TTL = 10 * 60
+CHALLENGERS, RESPONDERS = "challengers", "responders"
+
+# token -> {chat_id, message_id, challenger, challenger_name, move, opponent, born}
+_duels: dict[str, dict] = {}
+
+MOVE_BUTTONS = [
+    (duel.ATTACK, "⚔️ حمله"),
+    (duel.DEFEND, "🛡 دفاع"),
+    (duel.TRICK, "🌀 حیله"),
+]
+
+
+def move_keyboard(token: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(label, callback_data=f"d|{token}|{move}")
+        for move, label in MOVE_BUTTONS
+    ]])
+
+
+async def may(chat_id: int, user_id: int, key: str) -> bool:
+    raw = await asyncio.to_thread(roster.get_setting, chat_id, key)
+    if not raw or raw == "all":
+        return True
+    return str(user_id) in raw.split(",")
+
+
+def display_name(user) -> str:
+    return (user.first_name or user.username or str(user.id))[:16]
+
+
+def _expire() -> None:
+    now = time.time()
+    for token in [t for t, g in _duels.items() if now - g["born"] > DUEL_TTL]:
+        _duels.pop(token, None)
+
+
+async def start_duel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/duel [name] — open a challenge. The first move stays hidden."""
+    message = update.effective_message
+    chat_id = message.chat_id
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.reply_text("مبارزه فقط داخل گروه.")
+        return
+
+    challenger = message.from_user
+    if not await may(chat_id, challenger.id, CHALLENGERS):
+        await message.reply_text("تو اجازهٔ شروع مبارزه نداری. ⛔️")
+        return
+
+    _expire()
+
+    opponent = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        opponent = message.reply_to_message.from_user.id
+        opponent_name = display_name(message.reply_to_message.from_user)
+    elif context.args:
+        target, _ = best_match(" ".join(context.args),
+                               await chat_candidates(chat_id))
+        if target:
+            opponent = await ensure_user_id(context.bot, target)
+            opponent_name = seed.display_for(target) or target.display
+
+    token = secrets.token_urlsafe(6)
+    _duels[token] = {
+        "chat_id": chat_id,
+        "challenger": challenger.id,
+        "challenger_name": display_name(challenger),
+        "move": None,
+        "opponent": opponent,
+        "born": time.time(),
+    }
+
+    who = f"حریف: {opponent_name}" if opponent else "هر کسی می‌تواند جواب بدهد"
+    sent = await message.reply_text(
+        f"🏜 <b>مبارزه</b>\n{display_name(challenger)} چالش داد.\n{who}\n\n"
+        f"اول {display_name(challenger)} حرکتش را مخفیانه انتخاب کند:",
+        reply_markup=move_keyboard(token), parse_mode="HTML")
+    _duels[token]["message_id"] = sent.message_id
+
+
+async def on_move(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Both taps land here. The answer to the tap is a private toast, which is
+    what keeps the first move hidden from the second player."""
+    query = update.callback_query
+    try:
+        _, token, move = (query.data or "").split("|")
+    except ValueError:
+        await query.answer()
+        return
+
+    _expire()
+    match = _duels.get(token)
+    if not match:
+        await query.answer("این مبارزه منقضی شده.", show_alert=True)
+        return
+
+    user = query.from_user
+    chat_id = match["chat_id"]
+
+    # --- first move: only the challenger, and nobody gets to see it
+    if match["move"] is None:
+        if user.id != match["challenger"]:
+            await query.answer("این چالش مال تو نیست — صبر کن.", show_alert=True)
+            return
+        match["move"] = move
+        await query.answer(f"انتخاب تو: {duel.FA_MOVE[move]} — مخفی ماند 🤫",
+                           show_alert=True)
+        await query.edit_message_text(
+            f"🏜 <b>مبارزه</b>\n{match['challenger_name']} حرکتش را انتخاب کرد "
+            f"(مخفی).\n\nحالا حریف انتخاب کند:",
+            reply_markup=move_keyboard(token), parse_mode="HTML")
+        return
+
+    # --- second move
+    if user.id == match["challenger"]:
+        await query.answer("تو که انتخاب کردی. منتظر حریف بمان.", show_alert=True)
+        return
+    if match["opponent"] and user.id != match["opponent"]:
+        await query.answer("این مبارزه برای تو نیست.", show_alert=True)
+        return
+    if not await may(chat_id, user.id, RESPONDERS):
+        await query.answer("تو اجازهٔ جواب دادن نداری. ⛔️", show_alert=True)
+        return
+
+    _duels.pop(token, None)
+    await query.answer(f"انتخاب تو: {duel.FA_MOVE[move]}")
+
+    green_name = match["challenger_name"]
+    red_name = display_name(user)
+    green_move, red_move = match["move"], move
+    outcome = duel.winner_of(green_move, red_move)
+
+    await query.edit_message_text(
+        f"🏜 <b>مبارزه</b>\n{green_name} ({duel.FA_MOVE[green_move]}) "
+        f"در برابر {red_name} ({duel.FA_MOVE[red_move]})\n\nدر حال نبرد…",
+        parse_mode="HTML")
+
+    try:
+        await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_VIDEO)
+        async with _render_slots:
+            gif = await asyncio.to_thread(duel.make_duel_gif, green_name,
+                                          red_name, green_move, red_move,
+                                          secrets.randbelow(9999))
+        if outcome == 0:
+            caption = (f"🤝 مساوی — هر دو {duel.FA_MOVE[green_move]} "
+                       f"انتخاب کردند." if green_move == red_move
+                       else "🤝 مساوی")
+        else:
+            winner = green_name if outcome > 0 else red_name
+            loser = red_name if outcome > 0 else green_name
+            wmove = green_move if outcome > 0 else red_move
+            lmove = red_move if outcome > 0 else green_move
+            caption = (f"🏆 <b>{winner}</b> برد!\n"
+                       f"{duel.FA_MOVE[wmove]} حریفِ {duel.FA_MOVE[lmove]} را شکست داد "
+                       f"({loser} باخت)")
+        await context.bot.send_animation(
+            chat_id, animation=io.BytesIO(gif), filename="duel.gif",
+            caption=caption, parse_mode="HTML",
+            reply_to_message_id=match.get("message_id"))
+    except Exception:
+        log.exception("duel render failed in %s", chat_id)
+
+
+async def set_roles(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/challengers | /responders — owner only. `all` reopens it to everyone."""
+    message = update.effective_message
+    chat_id = message.chat_id
+    key = CHALLENGERS if (message.text or "").lstrip("/").startswith("challeng") \
+        else RESPONDERS
+    label = "شروع مبارزه" if key == CHALLENGERS else "جواب دادن"
+
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.reply_text("این دستور فقط داخل گروه کار می‌کند.")
+        return
+
+    raw = await asyncio.to_thread(roster.get_setting, chat_id, key)
+
+    if not context.args:
+        if not raw or raw == "all":
+            await message.reply_text(f"اجازهٔ {label}: همه\n"
+                                     f"/{key} <اسم‌ها> یا /{key} all")
+            return
+        people = await chat_candidates(chat_id)
+        by_id = {c.user_id: c for c in people}
+        names = [(seed.display_for(by_id[int(i)]) or by_id[int(i)].display)
+                 if int(i) in by_id else i for i in raw.split(",")]
+        await message.reply_text(f"اجازهٔ {label}: " + "، ".join(names))
+        return
+
+    if not await is_owner(context.bot, chat_id, message.from_user.id):
+        await message.reply_text("فقط مالک گروه می‌تواند این را تنظیم کند. ⛔️")
+        return
+
+    if context.args[0].lower() in ("all", "همه"):
+        await asyncio.to_thread(roster.set_setting, chat_id, key, "all")
+        await message.reply_text(f"اجازهٔ {label}: همه ✅")
+        return
+
+    people = await chat_candidates(chat_id)
+    ids, named, missed = [], [], []
+    for raw_name in " ".join(context.args).replace("،", ",").split(","):
+        raw_name = raw_name.strip()
+        if not raw_name:
+            continue
+        target, _ = best_match(raw_name, people)
+        if not target:
+            missed.append(raw_name)
+            continue
+        uid = await ensure_user_id(context.bot, target)
+        if not uid:
+            missed.append(raw_name)
+            continue
+        ids.append(str(uid))
+        named.append(seed.display_for(target) or target.display)
+
+    if not ids:
+        await message.reply_text("کسی پیدا نشد: " + "، ".join(missed))
+        return
+
+    await asyncio.to_thread(roster.set_setting, chat_id, key, ",".join(ids))
+    text = f"اجازهٔ {label}: " + "، ".join(named)
+    if missed:
+        text += "\nپیدا نشد: " + "، ".join(missed)
+    await message.reply_text(text + " ✅")
+
+
 def main() -> None:
     if not TOKEN:
         raise SystemExit("BOT_TOKEN is not set")
@@ -608,6 +844,10 @@ def main() -> None:
     app.add_handler(CommandHandler(["result", "natije"], show_tally), group=1)
     app.add_handler(CommandHandler("delete", delete_vote), group=1)
     app.add_handler(CommandHandler("ping", ping), group=1)
+    app.add_handler(CommandHandler(["duel", "mobareze"], start_duel), group=1)
+    app.add_handler(CommandHandler("challengers", set_roles), group=1)
+    app.add_handler(CommandHandler("responders", set_roles), group=1)
+    app.add_handler(CallbackQueryHandler(on_move, pattern=r"^d\|"), group=1)
     app.add_handler(
         MessageHandler((filters.TEXT | filters.CAPTION) & fresh, on_trigger),
         group=1,
@@ -618,7 +858,8 @@ def main() -> None:
     # deliberately NOT Update.ALL_TYPES: message_reaction updates are noise
     # here, and asking for them only invites the bug they caused.
     app.run_polling(
-        allowed_updates=["message", "chat_member", "my_chat_member"],
+        allowed_updates=["message", "callback_query", "chat_member",
+                         "my_chat_member"],
         drop_pending_updates=True,
     )
 
