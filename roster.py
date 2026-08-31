@@ -82,6 +82,11 @@ def _db() -> sqlite3.Connection:
             );
             CREATE INDEX IF NOT EXISTS travels_place
                 ON travels (chat_id, place, ts);
+            CREATE TABLE IF NOT EXISTS trips (
+                token   TEXT PRIMARY KEY,
+                payload TEXT,
+                ts      REAL
+            );
             CREATE TABLE IF NOT EXISTS settings (
                 chat_id INTEGER NOT NULL,
                 key     TEXT NOT NULL,
@@ -403,3 +408,43 @@ def clear_all_places(chat_id: int) -> int:
         _db().execute("DELETE FROM travels WHERE chat_id=?", (chat_id,))
         _db().commit()
         return cur.rowcount
+
+
+# --------------------------------------------------- trips for the mini app
+
+TRIP_TTL = 6 * 3600
+
+
+def save_trip(token: str, payload: str) -> None:
+    with _lock:
+        _db().execute(
+            "INSERT OR REPLACE INTO trips (token, payload, ts) VALUES (?,?,?)",
+            (token, payload, time.time()),
+        )
+        _db().execute("DELETE FROM trips WHERE ts < ?", (time.time() - TRIP_TTL,))
+        _db().commit()
+
+
+def load_trip(token: str) -> str | None:
+    with _lock:
+        row = _db().execute("SELECT payload FROM trips WHERE token=?",
+                            (token,)).fetchone()
+    return row[0] if row else None
+
+
+# ------------------------------------------- which board a DM should act on
+
+def chats_for_user(user_id: int) -> list[int]:
+    """Group chats where this person is known — as a player or just as a member,
+    most recent first."""
+    with _lock:
+        rows = _db().execute(
+            """SELECT chat_id, MAX(seen) FROM (
+                   SELECT chat_id, updated AS seen FROM players WHERE user_id=?
+                   UNION ALL
+                   SELECT chat_id, last_seen AS seen FROM members WHERE user_id=?
+               ) WHERE chat_id < 0
+             GROUP BY chat_id ORDER BY 2 DESC""",
+            (user_id, user_id),
+        ).fetchall()
+    return [r[0] for r in rows]
