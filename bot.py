@@ -17,13 +17,13 @@ import io
 import logging
 import os
 import re
+import json
 import secrets
 import time
-from urllib.parse import urlencode
 from collections import OrderedDict
 
 from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
-                      MessageEntity, Update, WebAppInfo)
+                      MessageEntity, Update)
 from telegram.constants import ChatAction, ChatMemberStatus, ChatType
 from telegram.ext import (
     Application,
@@ -831,6 +831,10 @@ async def set_roles(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ================================================================ the journey
 
 ADMIN_HANDLE = os.environ.get("ADMIN_HANDLE", "Aidinhagh").lstrip("@")
+# BotFather → /newapp → short name. Needed because a web_app button only works
+# in private chats; a Direct Link Mini App opens from a group too.
+MINIAPP = os.environ.get("MINIAPP_SHORT_NAME", "").strip()
+_bot_username: str | None = None
 EXACT_STEPS = True          # a 4 means four roads, not "up to four"
 PAGE = 8                    # destinations per keyboard page
 DICE_PAUSE = 4.2            # let the dice animation land before answering
@@ -841,6 +845,47 @@ _journeys: dict[str, dict] = {}
 
 def fa_num(n: int) -> str:
     return str(n).translate(_FA_DIGITS)
+
+
+HOME_KEY = "home"          # settings row (chat_id 0) remembering a DM's board
+
+
+async def board_for(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Which group's board does this message act on?
+
+    In a group: that group. In a DM there is no board of its own, so it acts on
+    the group the person plays in — remembered after the first time, and asked
+    about only when they belong to more than one.
+    """
+    message = update.effective_message
+    if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return message.chat_id, None
+
+    user_id = message.from_user.id
+    saved = await asyncio.to_thread(roster.get_setting, 0, f"{HOME_KEY}:{user_id}")
+    if saved:
+        return int(saved), None
+
+    chats = await asyncio.to_thread(roster.chats_for_user, user_id)
+    if not chats:
+        await message.reply_text(
+            "اول باید در گروه یک پیام بدهی تا بشناسمت، بعد اینجا هم می‌شود بازی کرد."
+        )
+        return None, None
+    if len(chats) == 1:
+        await asyncio.to_thread(roster.set_setting, 0, f"{HOME_KEY}:{user_id}",
+                                str(chats[0]))
+        return chats[0], None
+
+    rows = []
+    for cid in chats[:6]:
+        try:
+            title = (await context.bot.get_chat(cid)).title or str(cid)
+        except Exception:
+            title = str(cid)
+        rows.append([InlineKeyboardButton(title, callback_data=f"t|home|0|{cid}")])
+    await message.reply_text("کدام گروه؟", reply_markup=InlineKeyboardMarkup(rows))
+    return None, "asked"
 
 
 async def admin_id(bot) -> int | None:
@@ -868,7 +913,7 @@ async def report_to_admin(bot, chat_title: str, name: str, origin: str | None,
         return
     line = (f"🐫 <b>{name}</b>\n"
             f"{worldmap.name_of(origin) + ' ← ' if origin else 'شروع: '}"
-            f"<b>{worldmap.name_of(place)}</b>")
+            f"<b>{worldmap.describe(place)}</b>")
     if roll:
         line += f"\nتاس: {fa_num(roll)}"
     line += f"\nگروه: {chat_title}"
@@ -879,13 +924,39 @@ async def report_to_admin(bot, chat_title: str, name: str, origin: str | None,
                  ADMIN_HANDLE, exc)
 
 
+async def ride_button(bot, token: str, base: str | None):
+    """A link the group can actually open.
+
+    web_app buttons are private-chat only, so in a group we need either a
+    Direct Link Mini App (t.me/<bot>/<app>?startapp=<token>) or, failing that,
+    a plain URL that opens the ride in the browser.
+    """
+    global _bot_username
+    if MINIAPP:
+        if _bot_username is None:
+            try:
+                _bot_username = (await bot.get_me()).username
+            except Exception as exc:
+                log.warning("get_me failed: %s", exc)
+                _bot_username = ""
+        if _bot_username:
+            url = f"https://t.me/{_bot_username}/{MINIAPP}?startapp={token}"
+            return InlineKeyboardMarkup([[
+                InlineKeyboardButton("🐫 سوار شو", url=url)]])
+
+    if base:
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton("🐫 سوار شو", url=f"{base}/ride?t={token}")]])
+    return None
+
+
 def destination_keyboard(token: str, options: list[str], page: int,
                          ride_url: str | None = None) -> InlineKeyboardMarkup:
     pages = max(1, (len(options) + PAGE - 1) // PAGE)
     page = max(0, min(page, pages - 1))
     rows = []
     for pid in options[page * PAGE:(page + 1) * PAGE]:
-        rows.append([InlineKeyboardButton(worldmap.name_of(pid),
+        rows.append([InlineKeyboardButton(worldmap.short_describe(pid),
                                           callback_data=f"t|go|{token}|{pid}")])
     if pages > 1:
         rows.append([
@@ -900,9 +971,8 @@ def destination_keyboard(token: str, options: list[str], page: int,
 async def travel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/travel — first trip is a free choice; after that, roll for range."""
     message = update.effective_message
-    chat_id = message.chat_id
-    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await message.reply_text("سفر فقط داخل گروه.")
+    chat_id, asked = await board_for(update, context)
+    if chat_id is None:
         return
 
     user = message.from_user
@@ -914,7 +984,7 @@ async def travel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         head = (f"🗺 <b>{name}</b> هنوز جایی نیست.\n"
                 f"برای شروع هر جای نقشه را می‌توانی انتخاب کنی:")
     else:
-        sent = await context.bot.send_dice(chat_id, emoji="🎲",
+        sent = await context.bot.send_dice(message.chat_id, emoji="🎲",
                                            reply_to_message_id=message.message_id)
         roll = sent.dice.value
         await asyncio.sleep(DICE_PAUSE)
@@ -922,7 +992,7 @@ async def travel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not options:
             options = worldmap.reachable(origin, roll, exact=False)
         head = (f"🎲 <b>{name}</b> عدد {fa_num(roll)} آورد.\n"
-                f"از <b>{worldmap.name_of(origin)}</b> می‌توانی بروی به:")
+                f"از <b>{worldmap.describe(origin)}</b> می‌توانی بروی به:")
 
     token = secrets.token_urlsafe(6)
     _journeys[token] = {"chat_id": chat_id, "user_id": user.id, "name": name,
@@ -943,6 +1013,13 @@ async def on_travel_button(update: Update,
 
     if action == "nop":
         await query.answer()
+        return
+
+    if action == "home":
+        await asyncio.to_thread(roster.set_setting, 0,
+                                f"{HOME_KEY}:{query.from_user.id}", arg)
+        await query.answer("ثبت شد.")
+        await query.edit_message_text("گروه ثبت شد. حالا /travel بزن.")
         return
 
     trip = _journeys.get(token)
@@ -976,22 +1053,24 @@ async def on_travel_button(update: Update,
     await query.answer(f"راهیِ {worldmap.name_of(arg)} شدی 🐫")
 
     text = (f"🐫 <b>{name}</b> از "
-            f"<b>{worldmap.name_of(origin) if origin else 'ناکجا'}</b> "
-            f"راهی <b>{worldmap.name_of(arg)}</b> شد.")
+            f"<b>{worldmap.describe(origin) if origin else 'ناکجا'}</b> "
+            f"راهی <b>{worldmap.describe(arg)}</b> شد.")
     if others:
         text += "\nاینجا هستند: " + "، ".join(others)
 
-    base = web.public_url()
-    markup = None
-    if base:
-        params = urlencode({
-            "to": arg, "kind": worldmap.KIND.get(arg, "oasis"),
-            "title": worldmap.name_of(arg), "name": name,
-            "from": worldmap.name_of(origin) if origin else "",
-            "others": ",".join(others),
-        })
-        markup = InlineKeyboardMarkup([[InlineKeyboardButton(
-            "🐫 سوار شو", web_app=WebAppInfo(url=f"{base}/ride?{params}"))]])
+    ride_token = secrets.token_urlsafe(8).replace("-", "_")
+    await asyncio.to_thread(roster.save_trip, ride_token, json.dumps({
+        "to": arg, "kind": worldmap.KIND.get(arg, "oasis"),
+        "title": worldmap.name_of(arg), "name": name,
+        "from": worldmap.name_of(origin) if origin else "",
+        "others": others,
+    }))
+    markup = await ride_button(context.bot, ride_token, web.public_url())
+    if markup is None:
+        text += ("\n\n<i>سواری باز نمی‌شود: دامنه یا MINIAPP_SHORT_NAME "
+                 "تنظیم نشده — /webcheck</i>")
+        log.warning("no ride button: public_url=%r MINIAPP=%r",
+                    web.public_url(), MINIAPP)
 
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
 
@@ -1004,7 +1083,9 @@ async def on_travel_button(update: Update,
 async def where(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/where [name] — one player, or everyone."""
     message = update.effective_message
-    chat_id = message.chat_id
+    chat_id, _ = await board_for(update, context)
+    if chat_id is None:
+        return
     query = " ".join(context.args or [])
 
     if query:
@@ -1016,7 +1097,7 @@ async def where(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                                         target.user_id)
         label = seed.display_for(target) or target.display
         await message.reply_text(
-            f"{label}: {worldmap.name_of(place)}" if place
+            f"{label}: {worldmap.describe(place)}" if place
             else f"{label} هنوز وارد نقشه نشده."
         )
         return
@@ -1027,7 +1108,7 @@ async def where(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     lines = ["🗺 <b>موقعیت‌ها</b>", ""]
     for _uid, name, place, _ts in rows:
-        lines.append(f"• {name} — {worldmap.name_of(place)}")
+        lines.append(f"• {name} — {worldmap.describe(place)}")
     await message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
@@ -1091,6 +1172,32 @@ async def clear_locations(update: Update,
         f"موقعیت {label} پاک شد." if removed else f"{label} روی نقشه نبود.")
 
 
+async def webcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/webcheck — why the ride button is or isn't there."""
+    global _bot_username
+    if _bot_username is None:
+        try:
+            _bot_username = (await context.bot.get_me()).username
+        except Exception:
+            _bot_username = ""
+    base = web.public_url()
+    lines = [
+        f"نسخه: {VERSION}",
+        f"RAILWAY_PUBLIC_DOMAIN: {os.environ.get('RAILWAY_PUBLIC_DOMAIN') or '—'}",
+        f"WEBAPP_URL: {os.environ.get('WEBAPP_URL') or '—'}",
+        f"public_url(): {base or '—'}",
+        f"MINIAPP_SHORT_NAME: {MINIAPP or '—'}",
+        f"bot: @{_bot_username or '—'}",
+    ]
+    if MINIAPP and _bot_username:
+        lines.append(f"لینک: https://t.me/{_bot_username}/{MINIAPP}?startapp=test")
+    elif base:
+        lines.append(f"مرورگر: {base}/ride?t=test")
+    else:
+        lines.append("هیچ آدرسی تنظیم نشده — دکمهٔ سواری ساخته نمی‌شود.")
+    await update.effective_message.reply_text("\n".join(lines))
+
+
 async def show_map(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/map — what the bot believes the roads are, so it can be corrected."""
     text = worldmap.summary()
@@ -1132,6 +1239,7 @@ def main() -> None:
     app.add_handler(CommandHandler("setloc", set_location), group=1)
     app.add_handler(CommandHandler("clearlocs", clear_locations), group=1)
     app.add_handler(CommandHandler("map", show_map), group=1)
+    app.add_handler(CommandHandler("webcheck", webcheck), group=1)
     app.add_handler(CallbackQueryHandler(on_travel_button, pattern=r"^t\|"),
                     group=1)
     app.add_handler(
@@ -1142,6 +1250,7 @@ def main() -> None:
     problems = worldmap.sanity()
     if problems:
         log.warning("map problems: %s", problems)
+    log.info("mini app: %s", MINIAPP or "not set — rides open in the browser")
     log.info("polling… version %s, db %s, %d seeded people, %d places",
              VERSION, roster.DB_PATH, len(seed.PEOPLE), len(worldmap.PLACES))
     # deliberately NOT Update.ALL_TYPES: message_reaction updates are noise
