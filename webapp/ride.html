@@ -127,7 +127,7 @@ function resize(){
   const r = window.devicePixelRatio||1;
   Wd = cv.clientWidth; Ht = cv.clientHeight;
   cv.width = Wd*r; cv.height = Ht*r; cx.setTransform(r,0,0,r,0,0);
-  HORIZON = Ht*0.56;
+  HORIZON = Ht*0.46;
 }
 addEventListener('resize', resize); resize();
 
@@ -284,6 +284,19 @@ function camel(x, groundY, s, body, dark, walk, robe){
 }
 
 /* ---------- loop ---------- */
+/* one lane per traveller, fixed at load so they don't jitter between frames */
+let RIDER_LANES = [];
+function seedRiders(){
+  const robes = ['#6a3d6a','#3c5f8a','#7a5a2c'];
+  RIDER_LANES = OTHERS.map((_,i)=>({
+    lane:  i,
+    start: 0.62 - i*0.13,
+    rel:   [-2.4, 1.7, -1.1, 2.6][i % 4],   /* -ve drifts back, +ve overtakes */
+    scale: 0.50 + i*0.06,
+    robe:  robes[i % robes.length],
+  }));
+}
+
 let t0 = null, progress = 0, boost = 0;
 addEventListener('pointerdown', ()=>{ boost += 0.10; });
 
@@ -304,25 +317,29 @@ function frame(ts){
     for(let i=0;i<40;i++){ const sx=(hash('s'+i)%1000)/1000*Wd, sy=(hash('y'+i)%1000)/1000*HORIZON*0.8;
       cx.globalAlpha=.3+((i*37)%50)/100; cx.fillRect(sx,sy,2,2);} cx.globalAlpha=1; }
 
-  duneRidge(scroll*0.10, Ht*0.035, HORIZON-Ht*0.02, DP.sand[2], 1.5);
-  duneRidge(scroll*0.22, Ht*0.045, HORIZON+Ht*0.02, DP.sand[0], 0);
+  /* Distant dunes stay ABOVE the horizon line. They used to sit below it and
+     swallow the landmark whole. */
+  duneRidge(scroll*0.10, Ht*0.030, HORIZON-Ht*0.055, DP.sand[2], 1.5);
+  duneRidge(scroll*0.22, Ht*0.034, HORIZON-Ht*0.020, DP.sand[0], 0);
 
-  /* the destination, growing out of the haze */
+  /* ground, laid down before the landmark so it can stand on it */
+  cx.fillStyle=DP.sand[1]; cx.fillRect(0,HORIZON,Wd,Ht);
+
+  /* haze band along the horizon, behind the destination */
+  cx.save(); cx.globalAlpha=.5; cx.fillStyle=DP.haze; cx.filter='blur(9px)';
+  cx.fillRect(0,HORIZON-10,Wd,24); cx.restore();
+
+  /* the destination, standing on open ground and growing as you close in */
   const app = Math.max(0, (progress-0.12)/0.88);
   if(app>0){
-    const s = 0.25 + app*app*1.25;
-    cx.globalAlpha = Math.min(1, 0.25+app*1.4);
-    landmark(KIND, Wd*0.5 + (1-app)*Wd*0.16, HORIZON + Ht*0.05 + app*Ht*0.10, s);
+    const s = 0.30 + app*app*1.45;
+    cx.globalAlpha = Math.min(1, 0.30+app*1.5);
+    landmark(KIND, Wd*0.52 + (1-app)*Wd*0.14, HORIZON + Ht*0.055 + app*Ht*0.16, s);
     cx.globalAlpha = 1;
   }
 
-  /* ground */
-  cx.fillStyle=DP.sand[1]; cx.fillRect(0,HORIZON+Ht*0.055,Wd,Ht);
-  duneRidge(scroll*0.55, Ht*0.02, HORIZON+Ht*0.10, DP.sand[0], 0);
-
-  /* haze band */
-  cx.save(); cx.globalAlpha=.5; cx.fillStyle=DP.haze; cx.filter='blur(9px)';
-  cx.fillRect(0,HORIZON-8,Wd,26); cx.restore();
+  /* a low near ridge, in front of the landmark's feet for depth only */
+  duneRidge(scroll*0.55, Ht*0.014, HORIZON+Ht*0.20, DP.sand[0], 0);
 
   const drawLayer = (props, speed, y, scale, col, dk)=>{
     for(const p of props){
@@ -330,23 +347,32 @@ function frame(ts){
       if(x>-80 && x<Wd+80) prop(p.k, x, y, p.s*scale, col, dk);
     }
   };
-  drawLayer(farProps, 0.30, HORIZON+Ht*0.045, 0.5, DP.sand[0], DP.sand[1]);
-  drawLayer(midProps, 0.65, HORIZON+Ht*0.13,  0.85,'#3f7f4a', '#6b4f30');
+  drawLayer(farProps, 0.30, HORIZON+Ht*0.085, 0.45, DP.sand[0], DP.sand[1]);
+  drawLayer(midProps, 0.65, HORIZON+Ht*0.175, 0.80,'#3f7f4a', '#6b4f30');
 
-  /* other travellers on the same road, ahead of you */
+  /* Other travellers ride at their own pace: some slip behind and fall off the
+     left edge, some pull ahead and vanish to the right. Nobody is pinned to
+     your speed, which is what made them look like scenery before. */
+  const secs = (ts - (t0||ts)) / 1000;
   OTHERS.forEach((nm,i)=>{
-    const gy = HORIZON + Ht*0.16 + i*Ht*0.045;
-    const ox = Wd*0.62 - i*Wd*0.13 + Math.sin(ts/900+i)*4;
-    const sc = 0.5 + i*0.06;
-    camel(ox, gy, sc, '#b08a5c', '#7d5f3e', ts/150+i, i%2 ? '#6a3d6a' : '#3c5f8a');
+    const lane = RIDER_LANES[i];
+    const gy = HORIZON + Ht*(0.15 + lane.lane*0.05);
+    const ox = Wd*lane.start + lane.rel*secs*Wd*0.01 + Math.sin(ts/900+i)*3;
+    if (ox < -120 || ox > Wd+120) return;          // gone for good
+    const sc = lane.scale;
+    const edge = Math.min(1, Math.min(ox+120, Wd+120-ox)/110);
+    cx.globalAlpha = edge;
+    camel(ox, gy, sc, '#b08a5c', '#7d5f3e', ts/(150-lane.rel*3)+i,
+          lane.robe);
     cx.fillStyle='rgba(255,244,220,.92)'; cx.font=`${12+i}px system-ui`;
     cx.textAlign='center'; cx.fillText(nm, ox, gy-70*sc);
+    cx.globalAlpha = 1;
   });
 
-  drawLayer(nearProps, 1.15, HORIZON+Ht*0.30, 1.2, DP.sand[1], '#5c452c');
+  drawLayer(nearProps, 1.15, HORIZON+Ht*0.34, 1.2, DP.sand[1], '#5c452c');
 
   /* you */
-  const gy = HORIZON + Ht*0.34;
+  const gy = HORIZON + Ht*0.38;
   const bob = Math.sin(ts/140)*3;
   cx.save(); cx.globalAlpha=.25; cx.fillStyle='#000';
   cx.beginPath(); cx.ellipse(Wd*0.30, gy+4, 52, 10, 0, 0, 7); cx.fill(); cx.restore();
@@ -366,8 +392,7 @@ function frame(ts){
 
   if(progress>=1){
     document.getElementById('doneText').textContent = 'رسیدی به ' + TITLE;
-    document.getElementById('doneSub').textContent =
-      OTHERS.length ? 'اینجا هستند: ' + OTHERS.join('، ') : 'اینجا کسی نیست';
+    document.getElementById('doneSub').textContent = FROM ? 'از ' + FROM : '';
     document.getElementById('done').style.display='flex';
     document.getElementById('skip').style.display='none';
     return;
@@ -378,6 +403,7 @@ loadTrip().then(()=>{
   document.getElementById('rider').textContent = '🐫 ' + RIDER;
   document.getElementById('dest').textContent  = (FROM ? FROM + ' ← ' : '') + TITLE;
   seedWorld();
+  seedRiders();
   resize();
   const sp = document.getElementById('signpost');
   sp.textContent = 'به سوی ' + TITLE;
