@@ -125,6 +125,48 @@ def name_of(pid: str) -> str:
     return NAME.get(pid, pid)
 
 
+NAMED = [pid for pid, _, kind, _, _ in PLACES if kind != "oasis"]
+
+
+def landmarks_near(pid: str, want: int = 2) -> list[str]:
+    """The nearest named places, for describing an oasis by its surroundings."""
+    seen = {pid}
+    ring = [pid]
+    found: list[str] = []
+    while ring and len(found) < want:
+        nxt = []
+        for here in ring:
+            for other in sorted(NEIGHBOURS.get(here, ())):
+                if other in seen:
+                    continue
+                seen.add(other)
+                if KIND.get(other) != "oasis":
+                    found.append(other)
+                else:
+                    nxt.append(other)
+        ring = nxt
+    return found[:want]
+
+
+def describe(pid: str) -> str:
+    """'واحهٔ ۸ (بین کعبه و میدان اسب‌سواری دمشق)' — an oasis is only meaningful
+    by what it sits between."""
+    name = name_of(pid)
+    if KIND.get(pid) != "oasis":
+        return name
+    near = landmarks_near(pid, 2)
+    if not near:
+        return name
+    if len(near) == 1:
+        return f"{name} (نزدیک {name_of(near[0])})"
+    return f"{name} (بین {name_of(near[0])} و {name_of(near[1])})"
+
+
+def short_describe(pid: str, limit: int = 60) -> str:
+    text = describe(pid)
+    return text if len(text) <= limit else name_of(pid)
+
+
 def distances_from(start: str) -> dict[str, int]:
     """Road-hops from `start` to everywhere reachable."""
     seen = {start: 0}
@@ -174,7 +216,8 @@ def summary() -> str:
     lines = [f"{len(PLACES)} مکان، {len(ROADS)} جاده", ""]
     for pid, name, kind, _, _ in PLACES:
         links = "، ".join(sorted(NAME[n] for n in NEIGHBOURS[pid]))
-        lines.append(f"• {name} → {links}")
+        label = describe(pid) if kind == "oasis" else name
+        lines.append(f"• {label} → {links}")
     return "\n".join(lines)
 
 
