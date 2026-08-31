@@ -19,10 +19,11 @@ import os
 import re
 import secrets
 import time
+from urllib.parse import urlencode
 from collections import OrderedDict
 
 from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
-                      MessageEntity, Update)
+                      MessageEntity, Update, WebAppInfo)
 from telegram.constants import ChatAction, ChatMemberStatus, ChatType
 from telegram.ext import (
     Application,
@@ -37,6 +38,8 @@ import duel
 import matching
 import roster
 import seed
+import web
+import worldmap
 from animator import make_gif
 from matching import Candidate, best_match
 
@@ -418,6 +421,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "#رای علی — رأی به یک نفر\n"
         "#رایگیری — نتیجه ۲۴ ساعت گذشته\n"
         "/duel — مبارزه: حمله / دفاع / حیله\n"
+        "/travel — سفر روی نقشه\n"
         "/delete — فقط مالک گروه: حذف رأی\n\n"
         "اسم فارسی یا انگلیسی، کوتاه‌شده یا یوزرنیم — پیدا می‌کنم. 🗳️"
     )
@@ -822,6 +826,278 @@ async def set_roles(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await message.reply_text(text + " ✅")
 
 
+
+
+# ================================================================ the journey
+
+ADMIN_HANDLE = os.environ.get("ADMIN_HANDLE", "Aidinhagh").lstrip("@")
+EXACT_STEPS = True          # a 4 means four roads, not "up to four"
+PAGE = 8                    # destinations per keyboard page
+DICE_PAUSE = 4.2            # let the dice animation land before answering
+
+# token -> {chat_id, user_id, name, origin, roll, options, page}
+_journeys: dict[str, dict] = {}
+
+
+def fa_num(n: int) -> str:
+    return str(n).translate(_FA_DIGITS)
+
+
+async def admin_id(bot) -> int | None:
+    """Numeric id for the person the reports go to."""
+    cached = await asyncio.to_thread(roster.known_handle, ADMIN_HANDLE)
+    if cached:
+        return cached
+    try:
+        chat = await bot.get_chat(f"@{ADMIN_HANDLE}")
+    except Exception as exc:
+        log.info("cannot resolve admin @%s: %s", ADMIN_HANDLE, exc)
+        return None
+    if chat and chat.id:
+        await asyncio.to_thread(roster.store_handle, ADMIN_HANDLE, chat.id)
+        return chat.id
+    return None
+
+
+async def report_to_admin(bot, chat_title: str, name: str, origin: str | None,
+                          place: str, roll: int | None) -> None:
+    """DM the move. Telegram forbids bots from opening a chat, so this only
+    works once the admin has pressed Start in the bot's private chat."""
+    target = await admin_id(bot)
+    if not target:
+        return
+    line = (f"🐫 <b>{name}</b>\n"
+            f"{worldmap.name_of(origin) + ' ← ' if origin else 'شروع: '}"
+            f"<b>{worldmap.name_of(place)}</b>")
+    if roll:
+        line += f"\nتاس: {fa_num(roll)}"
+    line += f"\nگروه: {chat_title}"
+    try:
+        await bot.send_message(target, line, parse_mode="HTML")
+    except Exception as exc:
+        log.info("admin DM failed (has @%s started the bot?): %s",
+                 ADMIN_HANDLE, exc)
+
+
+def destination_keyboard(token: str, options: list[str], page: int,
+                         ride_url: str | None = None) -> InlineKeyboardMarkup:
+    pages = max(1, (len(options) + PAGE - 1) // PAGE)
+    page = max(0, min(page, pages - 1))
+    rows = []
+    for pid in options[page * PAGE:(page + 1) * PAGE]:
+        rows.append([InlineKeyboardButton(worldmap.name_of(pid),
+                                          callback_data=f"t|go|{token}|{pid}")])
+    if pages > 1:
+        rows.append([
+            InlineKeyboardButton("◀️", callback_data=f"t|pg|{token}|{page - 1}"),
+            InlineKeyboardButton(f"{fa_num(page + 1)}/{fa_num(pages)}",
+                                 callback_data="t|nop|0|0"),
+            InlineKeyboardButton("▶️", callback_data=f"t|pg|{token}|{page + 1}"),
+        ])
+    return InlineKeyboardMarkup(rows)
+
+
+async def travel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/travel — first trip is a free choice; after that, roll for range."""
+    message = update.effective_message
+    chat_id = message.chat_id
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.reply_text("سفر فقط داخل گروه.")
+        return
+
+    user = message.from_user
+    name = display_name(user)
+    origin = await asyncio.to_thread(roster.get_place, chat_id, user.id)
+
+    if origin is None:
+        options, roll = list(worldmap.IDS), None
+        head = (f"🗺 <b>{name}</b> هنوز جایی نیست.\n"
+                f"برای شروع هر جای نقشه را می‌توانی انتخاب کنی:")
+    else:
+        sent = await context.bot.send_dice(chat_id, emoji="🎲",
+                                           reply_to_message_id=message.message_id)
+        roll = sent.dice.value
+        await asyncio.sleep(DICE_PAUSE)
+        options = worldmap.reachable(origin, roll, exact=EXACT_STEPS)
+        if not options:
+            options = worldmap.reachable(origin, roll, exact=False)
+        head = (f"🎲 <b>{name}</b> عدد {fa_num(roll)} آورد.\n"
+                f"از <b>{worldmap.name_of(origin)}</b> می‌توانی بروی به:")
+
+    token = secrets.token_urlsafe(6)
+    _journeys[token] = {"chat_id": chat_id, "user_id": user.id, "name": name,
+                        "origin": origin, "roll": roll, "options": options,
+                        "born": time.time()}
+    await message.reply_text(head, parse_mode="HTML",
+                             reply_markup=destination_keyboard(token, options, 0))
+
+
+async def on_travel_button(update: Update,
+                           context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    parts = (query.data or "").split("|")
+    if len(parts) != 4:
+        await query.answer()
+        return
+    _, action, token, arg = parts
+
+    if action == "nop":
+        await query.answer()
+        return
+
+    trip = _journeys.get(token)
+    if not trip:
+        await query.answer("این سفر منقضی شده. دوباره /travel بزن.",
+                           show_alert=True)
+        return
+    if query.from_user.id != trip["user_id"]:
+        await query.answer("این سفر مال تو نیست.", show_alert=True)
+        return
+
+    if action == "pg":
+        await query.answer()
+        await query.edit_message_reply_markup(
+            destination_keyboard(token, trip["options"], int(arg)))
+        return
+
+    if arg not in trip["options"]:
+        await query.answer("از اینجا نمی‌شود به آنجا رفت.", show_alert=True)
+        return
+
+    _journeys.pop(token, None)
+    chat_id, user_id, name = trip["chat_id"], trip["user_id"], trip["name"]
+    origin, roll = trip["origin"], trip["roll"]
+
+    await asyncio.to_thread(roster.set_place, chat_id, user_id, name, arg)
+    await asyncio.to_thread(roster.log_travel, chat_id, user_id, name, arg,
+                            origin, roll)
+    others = await asyncio.to_thread(roster.others_at, chat_id, arg, user_id, 3)
+
+    await query.answer(f"راهیِ {worldmap.name_of(arg)} شدی 🐫")
+
+    text = (f"🐫 <b>{name}</b> از "
+            f"<b>{worldmap.name_of(origin) if origin else 'ناکجا'}</b> "
+            f"راهی <b>{worldmap.name_of(arg)}</b> شد.")
+    if others:
+        text += "\nاینجا هستند: " + "، ".join(others)
+
+    base = web.public_url()
+    markup = None
+    if base:
+        params = urlencode({
+            "to": arg, "kind": worldmap.KIND.get(arg, "oasis"),
+            "title": worldmap.name_of(arg), "name": name,
+            "from": worldmap.name_of(origin) if origin else "",
+            "others": ",".join(others),
+        })
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "🐫 سوار شو", web_app=WebAppInfo(url=f"{base}/ride?{params}"))]])
+
+    await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+
+    title = query.message.chat.title or str(chat_id)
+    await report_to_admin(context.bot, title, name, origin, arg, roll)
+
+
+# ------------------------------------------------------- looking after it all
+
+async def where(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/where [name] — one player, or everyone."""
+    message = update.effective_message
+    chat_id = message.chat_id
+    query = " ".join(context.args or [])
+
+    if query:
+        target, _ = best_match(query, await chat_candidates(chat_id))
+        if not target:
+            await message.reply_text("کسی پیدا نشد.")
+            return
+        place = await asyncio.to_thread(roster.get_place, chat_id,
+                                        target.user_id)
+        label = seed.display_for(target) or target.display
+        await message.reply_text(
+            f"{label}: {worldmap.name_of(place)}" if place
+            else f"{label} هنوز وارد نقشه نشده."
+        )
+        return
+
+    rows = await asyncio.to_thread(roster.all_players, chat_id)
+    if not rows:
+        await message.reply_text("هنوز کسی روی نقشه نیست.")
+        return
+    lines = ["🗺 <b>موقعیت‌ها</b>", ""]
+    for _uid, name, place, _ts in rows:
+        lines.append(f"• {name} — {worldmap.name_of(place)}")
+    await message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def set_location(update: Update,
+                       context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/setloc <person> = <place> — owner only."""
+    message = update.effective_message
+    chat_id = message.chat_id
+    if not await is_owner(context.bot, chat_id, message.from_user.id):
+        await message.reply_text("فقط مالک گروه. ⛔️")
+        return
+
+    raw = " ".join(context.args or [])
+    if "=" not in raw:
+        await message.reply_text("/setloc <اسم> = <مکان>")
+        return
+    who, _, where_text = raw.partition("=")
+
+    target, _ = best_match(who.strip(), await chat_candidates(chat_id))
+    if not target:
+        await message.reply_text(f"کسی به اسم «{who.strip()}» پیدا نشد.")
+        return
+    place = worldmap.find(where_text.strip())
+    if not place:
+        await message.reply_text(f"مکانی به اسم «{where_text.strip()}» نداریم.")
+        return
+
+    uid = await ensure_user_id(context.bot, target)
+    if not uid:
+        await message.reply_text("این نفر هنوز آی‌دی ندارد — یک پیام بدهد.")
+        return
+    label = seed.display_for(target) or target.display
+    await asyncio.to_thread(roster.set_place, chat_id, uid, label, place)
+    await message.reply_text(f"{label} → {worldmap.name_of(place)} ✅")
+
+
+async def clear_locations(update: Update,
+                          context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/clearlocs [name|all] — owner only."""
+    message = update.effective_message
+    chat_id = message.chat_id
+    if not await is_owner(context.bot, chat_id, message.from_user.id):
+        await message.reply_text("فقط مالک گروه. ⛔️")
+        return
+
+    arg = " ".join(context.args or []).strip()
+    if arg.lower() in ("all", "همه", ""):
+        removed = await asyncio.to_thread(roster.clear_all_places, chat_id)
+        await message.reply_text(
+            f"{fa_num(removed)} موقعیت پاک شد. همه از اول شروع می‌کنند. 🧹")
+        return
+
+    target, _ = best_match(arg, await chat_candidates(chat_id))
+    if not target:
+        await message.reply_text("کسی پیدا نشد.")
+        return
+    uid = await ensure_user_id(context.bot, target)
+    removed = await asyncio.to_thread(roster.clear_place, chat_id, uid or 0)
+    label = seed.display_for(target) or target.display
+    await message.reply_text(
+        f"موقعیت {label} پاک شد." if removed else f"{label} روی نقشه نبود.")
+
+
+async def show_map(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/map — what the bot believes the roads are, so it can be corrected."""
+    text = worldmap.summary()
+    for chunk in [text[i:i + 3500] for i in range(0, len(text), 3500)]:
+        await update.effective_message.reply_text(chunk)
+
+
 def main() -> None:
     if not TOKEN:
         raise SystemExit("BOT_TOKEN is not set")
@@ -835,7 +1111,10 @@ def main() -> None:
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
-    app = Application.builder().token(TOKEN).build()
+    async def _boot(_app) -> None:
+        await web.start()
+
+    app = Application.builder().token(TOKEN).post_init(_boot).build()
     fresh = filters.UpdateType.MESSAGE
     app.add_handler(MessageHandler(filters.ALL & fresh, track), group=0)
     app.add_handler(CommandHandler(["start", "help"], start), group=1)
@@ -848,13 +1127,23 @@ def main() -> None:
     app.add_handler(CommandHandler("challengers", set_roles), group=1)
     app.add_handler(CommandHandler("responders", set_roles), group=1)
     app.add_handler(CallbackQueryHandler(on_move, pattern=r"^d\|"), group=1)
+    app.add_handler(CommandHandler(["travel", "safar"], travel), group=1)
+    app.add_handler(CommandHandler(["where", "locations"], where), group=1)
+    app.add_handler(CommandHandler("setloc", set_location), group=1)
+    app.add_handler(CommandHandler("clearlocs", clear_locations), group=1)
+    app.add_handler(CommandHandler("map", show_map), group=1)
+    app.add_handler(CallbackQueryHandler(on_travel_button, pattern=r"^t\|"),
+                    group=1)
     app.add_handler(
         MessageHandler((filters.TEXT | filters.CAPTION) & fresh, on_trigger),
         group=1,
     )
     app.add_error_handler(on_error)
-    log.info("polling… version %s, roster db: %s, %d seeded people",
-             VERSION, roster.DB_PATH, len(seed.PEOPLE))
+    problems = worldmap.sanity()
+    if problems:
+        log.warning("map problems: %s", problems)
+    log.info("polling… version %s, db %s, %d seeded people, %d places",
+             VERSION, roster.DB_PATH, len(seed.PEOPLE), len(worldmap.PLACES))
     # deliberately NOT Update.ALL_TYPES: message_reaction updates are noise
     # here, and asking for them only invites the bug they caused.
     app.run_polling(
