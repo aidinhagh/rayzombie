@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>سفر</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  html,body{margin:0;height:100%;background:#0d0b09;overflow:hidden;
+    font-family:system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif}
+  canvas{display:block;width:100%;height:100%;touch-action:none}
+  #hud{position:fixed;inset-inline:0;top:0;padding:10px 14px;color:#fff3dc;
+    text-shadow:0 2px 6px rgba(0,0,0,.7);display:flex;justify-content:space-between;
+    align-items:center;font-size:15px;pointer-events:none}
+  #bar{position:fixed;inset-inline:14px;bottom:20px;height:8px;border-radius:99px;
+    background:rgba(255,240,210,.25);overflow:hidden}
+  #fill{height:100%;width:0;background:linear-gradient(90deg,#ffd98a,#ff9f43);
+    transition:width .2s linear}
+  #done{position:fixed;inset:0;display:none;flex-direction:column;gap:16px;
+    align-items:center;justify-content:center;background:rgba(12,10,8,.72);
+    color:#fff3dc;text-align:center;padding:24px}
+  #done h1{font-size:26px;margin:0}
+  #done button{font:inherit;font-size:16px;padding:12px 26px;border:0;border-radius:12px;
+    background:#e8c579;color:#2b1d0e;font-weight:700}
+  #skip{position:fixed;bottom:38px;inset-inline-start:14px;color:#fff3dc;opacity:.75;
+    font-size:13px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><span id="rider"></span><span id="dest"></span></div>
+<div id="bar"><div id="fill"></div></div>
+<div id="skip">برای رسیدن سریع‌تر، ضربه بزن</div>
+<div id="done">
+  <h1 id="doneText"></h1>
+  <div id="doneSub" style="opacity:.8"></div>
+  <button onclick="finish()">بازگشت به گروه</button>
+</div>
+<script>
+const P = new URLSearchParams(location.search);
+const DEST  = P.get('to')   || 'oasis1';
+const KIND  = P.get('kind') || 'oasis';
+const TITLE = P.get('title')|| 'مقصد';
+const FROM  = P.get('from') || '';
+const RIDER = P.get('name') || 'مسافر';
+const OTHERS = (P.get('others')||'').split(',').filter(Boolean).slice(0,3);
+const TRIP_MS = 26000;
+
+document.getElementById('rider').textContent = '🐫 ' + RIDER;
+document.getElementById('dest').textContent  = (FROM ? FROM + ' ← ' : '') + TITLE;
+
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+function finish(){ if (tg) tg.close(); else history.back(); }
+
+/* deterministic per-destination, so a place always looks like itself */
+function hash(s){let h=2166136261;for(const ch of s){h^=ch.charCodeAt(0);h=Math.imul(h,16777619);}return h>>>0;}
+function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+const seed = hash(DEST), rnd = mulberry(seed);
+
+/* ---------- scenery variety: time of day + palette ---------- */
+const DAYPARTS = [
+  {name:'dawn',  sky:['#f7b26a','#f6d9a6','#f9ead0'], sun:'#fff0c2', haze:'#f8dcb0', sand:['#d9ab68','#c4924f','#f3dcae'], shade:.30},
+  {name:'noon',  sky:['#79a2c8','#bcd2e2','#f4e2c0'], sun:'#fffbe8', haze:'#f2e2c2', sand:['#d8b075','#bb9155','#f7e6bd'], shade:.18},
+  {name:'dusk',  sky:['#6b4f86','#d1725f','#f6b877'], sun:'#ffd9a0', haze:'#e9ab84', sand:['#b98a5d','#8f6742','#e5c193'], shade:.42},
+  {name:'night', sky:['#101a34','#25355c','#4a557d'], sun:'#e9eeff', haze:'#38456b', sand:['#6d6a72','#4b4750','#9b9392'], shade:.55},
+];
+const DP = DAYPARTS[seed % DAYPARTS.length];
+const PROPS = ['palm','rock','cactus','tent','stones','bones'];
+
+const cv = document.getElementById('c'), cx = cv.getContext('2d');
+let Wd=0, Ht=0, HORIZON=0;
+function resize(){
+  const r = window.devicePixelRatio||1;
+  Wd = cv.clientWidth; Ht = cv.clientHeight;
+  cv.width = Wd*r; cv.height = Ht*r; cx.setTransform(r,0,0,r,0,0);
+  HORIZON = Ht*0.56;
+}
+addEventListener('resize', resize); resize();
+
+/* ---------- static scatter, generated once ---------- */
+const farProps=[], midProps=[], nearProps=[];
+for(let i=0;i<26;i++) farProps.push({x:rnd()*4000, k:PROPS[(rnd()*PROPS.length)|0], s:.35+rnd()*.25});
+for(let i=0;i<20;i++) midProps.push({x:rnd()*4000, k:PROPS[(rnd()*PROPS.length)|0], s:.6+rnd()*.35});
+for(let i=0;i<16;i++) nearProps.push({x:rnd()*4000, k:PROPS[(rnd()*PROPS.length)|0], s:1+rnd()*.5});
+
+function duneRidge(off, amp, base, colour, blur){
+  cx.save(); cx.fillStyle = colour; if(blur){cx.filter=`blur(${blur}px)`;}
+  cx.beginPath(); cx.moveTo(-10, Ht);
+  for(let x=-10;x<=Wd+10;x+=8){
+    const t=(x+off)*0.0032;
+    const y = base + Math.sin(t)*amp + Math.sin(t*2.7+1.3)*amp*0.45 + Math.sin(t*0.6)*amp*0.7;
+    cx.lineTo(x,y);
+  }
+  cx.lineTo(Wd+10, Ht); cx.closePath(); cx.fill(); cx.restore();
+}
+
+/* ---------- props ---------- */
+function prop(k,x,y,s,col,dark){
+  cx.save(); cx.translate(x,y); cx.scale(s,s); cx.fillStyle=col;
+  if(k==='palm'){
+    cx.fillStyle=dark; cx.fillRect(-3,-46,6,46);
+    cx.fillStyle=col;
+    for(let i=0;i<6;i++){const a=-Math.PI/2 + (i-2.5)*0.42;
+      cx.beginPath(); cx.ellipse(Math.cos(a)*20, -46+Math.sin(a)*14, 22, 6, a, 0, 7); cx.fill();}
+  } else if(k==='rock'){
+    cx.beginPath(); cx.moveTo(-16,0); cx.lineTo(-6,-16); cx.lineTo(8,-13);
+    cx.lineTo(17,0); cx.closePath(); cx.fill();
+  } else if(k==='cactus'){
+    cx.fillRect(-4,-34,8,34); cx.fillRect(-14,-24,10,5); cx.fillRect(-14,-24,5,14);
+    cx.fillRect(4,-29,10,5); cx.fillRect(9,-29,5,12);
+  } else if(k==='tent'){
+    cx.beginPath(); cx.moveTo(-24,0); cx.lineTo(0,-26); cx.lineTo(24,0); cx.closePath(); cx.fill();
+    cx.fillStyle=dark; cx.beginPath(); cx.moveTo(-4,0); cx.lineTo(0,-26); cx.lineTo(4,0); cx.closePath(); cx.fill();
+  } else if(k==='stones'){
+    for(let i=-2;i<=2;i++){cx.beginPath();cx.ellipse(i*11,0,6,4,0,0,7);cx.fill();}
+  } else {                                   /* bones */
+    cx.fillRect(-18,-3,36,4); cx.beginPath(); cx.arc(-18,-1,5,0,7); cx.arc(18,-1,5,0,7); cx.fill();
+  }
+  cx.restore();
+}
+
+/* ---------- the landmark you are riding towards ---------- */
+function landmark(kind, x, groundY, s){
+  cx.save(); cx.translate(x, groundY); cx.scale(s,s);
+  const stone='#cdb894', stoneD='#a08a68', dark='#6d5a42', gold='#e3c069';
+  const wall=(w,h,c)=>{cx.fillStyle=c||stone; cx.fillRect(-w/2,-h,w,h);};
+  const dome=(r,c)=>{cx.fillStyle=c||stone; cx.beginPath(); cx.arc(0,0,r,Math.PI,0); cx.fill();};
+
+  if(kind==='kaaba'){
+    cx.fillStyle='#1d1c1f'; cx.fillRect(-38,-74,76,74);
+    cx.fillStyle=gold; cx.fillRect(-38,-50,76,7);
+    cx.fillStyle='#3a3840'; cx.fillRect(14,-40,12,26);
+  } else if(kind==='mosque'){
+    wall(96,52); dome(30,'#e5d6b6');
+    cx.fillStyle=stone; cx.fillRect(-58,-88,12,88); cx.fillRect(46,-88,12,88);
+    cx.fillStyle=gold; cx.beginPath(); cx.arc(-52,-90,7,0,7); cx.arc(52,-90,7,0,7); cx.fill();
+  } else if(kind==='palace'){
+    wall(130,64); cx.fillStyle=stoneD; cx.fillRect(-65,-72,130,10);
+    for(const dx of [-46,0,46]){cx.save();cx.translate(dx,-64);dome(20,'#dcc79f');cx.restore();}
+    cx.fillStyle=dark; cx.fillRect(-14,-34,28,34);
+  } else if(kind==='market'){
+    for(let i=-1;i<=1;i++){cx.fillStyle=i%2?'#c8543f':'#3f7f6a';
+      cx.beginPath();cx.moveTo(i*46-26,-34);cx.lineTo(i*46+26,-34);cx.lineTo(i*46+30,-24);cx.lineTo(i*46-30,-24);cx.closePath();cx.fill();
+      cx.fillStyle=stone; cx.fillRect(i*46-24,-24,48,24);}
+  } else if(kind==='prison'){
+    wall(104,66,stoneD); cx.fillStyle=dark;
+    for(let i=-2;i<=2;i++) cx.fillRect(i*16-3,-52,5,34);
+    cx.fillStyle=stoneD; cx.fillRect(-60,-80,16,80); cx.fillRect(44,-80,16,80);
+  } else if(kind==='clinic'){
+    wall(100,54); dome(26,'#e9dcc0');
+    cx.fillStyle='#3f7f6a'; cx.fillRect(-6,-46,12,30); cx.fillRect(-15,-37,30,12);
+  } else if(kind==='inn'){
+    wall(120,50,stoneD); cx.fillStyle=stone; cx.fillRect(-62,-60,124,12);
+    cx.fillStyle=dark; cx.beginPath(); cx.moveTo(-20,0); cx.lineTo(-20,-34);
+    cx.arc(0,-34,20,Math.PI,0); cx.lineTo(20,0); cx.closePath(); cx.fill();
+  } else if(kind==='cemetery'){
+    cx.fillStyle=stoneD;
+    for(const dx of [-42,-14,16,44]){cx.beginPath();cx.moveTo(dx-9,0);cx.lineTo(dx-9,-24);
+      cx.arc(dx,-24,9,Math.PI,0);cx.lineTo(dx+9,0);cx.closePath();cx.fill();}
+    cx.fillStyle='#8d7a5c'; cx.fillRect(-70,-4,140,5);
+  } else if(kind==='treasury'){
+    wall(96,52); cx.fillStyle=gold; cx.fillRect(-48,-62,96,12);
+    cx.fillStyle=dark; cx.fillRect(-16,-34,32,34);
+    cx.fillStyle=gold; cx.beginPath(); cx.arc(0,-18,6,0,7); cx.fill();
+  } else if(kind==='guardpost'){
+    wall(74,46,stoneD); cx.fillStyle=stone; cx.fillRect(-44,-58,88,12);
+    cx.fillStyle='#c8543f'; cx.fillRect(-3,-92,4,36);
+    cx.beginPath(); cx.moveTo(1,-92); cx.lineTo(30,-84); cx.lineTo(1,-74); cx.closePath(); cx.fill();
+  } else if(kind==='tavern'){
+    wall(104,48,'#8a6a46'); cx.fillStyle='#5f4630';
+    cx.beginPath(); cx.moveTo(-58,-48); cx.lineTo(0,-70); cx.lineTo(58,-48); cx.closePath(); cx.fill();
+    cx.fillStyle='#f0c56a'; cx.fillRect(-30,-36,20,18); cx.fillRect(12,-36,20,18);
+  } else if(kind==='arena'){
+    cx.fillStyle=stoneD; cx.beginPath(); cx.ellipse(0,-6,84,26,0,Math.PI,0); cx.fill();
+    cx.fillStyle=stone; cx.fillRect(-84,-32,168,26);
+    cx.fillStyle=dark; for(let i=-4;i<=4;i++) cx.fillRect(i*18-3,-32,6,26);
+  } else if(kind==='cave'){
+    cx.fillStyle=stoneD; cx.beginPath(); cx.moveTo(-92,0); cx.lineTo(-38,-86);
+    cx.lineTo(18,-58); cx.lineTo(78,-96); cx.lineTo(104,0); cx.closePath(); cx.fill();
+    cx.fillStyle='#241c14'; cx.beginPath(); cx.moveTo(-14,0); cx.lineTo(-12,-30);
+    cx.arc(2,-30,14,Math.PI,0); cx.lineTo(18,0); cx.closePath(); cx.fill();
+  } else if(kind==='square'){
+    cx.fillStyle=stone; cx.fillRect(-90,-16,180,16);
+    cx.fillStyle=stoneD; cx.fillRect(-8,-78,16,62);
+    cx.fillStyle=gold; cx.beginPath(); cx.arc(0,-84,9,0,7); cx.fill();
+    for(const dx of [-64,64]){cx.fillStyle=stoneD; cx.fillRect(dx-6,-46,12,30);}
+  } else if(kind==='caravan'){
+    cx.fillStyle=stoneD; cx.fillRect(-70,-30,140,30);
+    cx.fillStyle='#8a6a46';
+    for(const dx of [-40,0,40]){cx.beginPath();cx.moveTo(dx-22,-30);cx.lineTo(dx,-56);cx.lineTo(dx+22,-30);cx.closePath();cx.fill();}
+    camel(46,0,.55,'#a97f52','#7b5c3c',0);
+  } else if(kind==='river'){
+    cx.fillStyle='#4f8fa8'; cx.beginPath(); cx.ellipse(0,-6,120,20,0,0,7); cx.fill();
+    cx.fillStyle='#7fc0d4'; cx.beginPath(); cx.ellipse(-18,-10,74,9,0,0,7); cx.fill();
+    for(const dx of [-92,86]) prop('palm',dx,-4,1.1,'#3f7f4a','#6b4f30');
+  } else {                                   /* oasis */
+    cx.fillStyle='#4f8fa8'; cx.beginPath(); cx.ellipse(0,-6,52,15,0,0,7); cx.fill();
+    prop('palm',-40,-4,1.2,'#3f7f4a','#6b4f30');
+    prop('palm',34,-2,1.0,'#357043','#5d452a');
+    cx.fillStyle='#8a6a46'; cx.beginPath(); cx.moveTo(58,0); cx.lineTo(76,-22); cx.lineTo(94,0); cx.closePath(); cx.fill();
+  }
+  cx.restore();
+}
+
+/* ---------- camel and rider ---------- */
+function camel(x, groundY, s, body, dark, walk, robe){
+  cx.save(); cx.translate(x, groundY); cx.scale(s,s);
+  const sw = Math.sin(walk), sw2 = Math.sin(walk+2.1);
+  cx.strokeStyle=dark; cx.lineWidth=6; cx.lineCap='round';
+  for(const [px,ph] of [[-16,sw],[-10,sw2],[14,sw2],[20,sw]]){
+    cx.beginPath(); cx.moveTo(px,-34); cx.lineTo(px+ph*7,-16); cx.lineTo(px+ph*10,0); cx.stroke();
+  }
+  cx.fillStyle=body;
+  cx.beginPath(); cx.ellipse(0,-42,30,15,0,0,7); cx.fill();
+  cx.beginPath(); cx.ellipse(-2,-54,13,11,0,0,7); cx.fill();          /* hump */
+  cx.beginPath(); cx.moveTo(22,-46); cx.quadraticCurveTo(38,-56,36,-72); cx.lineTo(30,-72);
+  cx.quadraticCurveTo(30,-56,17,-40); cx.closePath(); cx.fill();       /* neck */
+  cx.beginPath(); cx.ellipse(35,-75,10,6,-0.3,0,7); cx.fill();         /* head */
+  cx.fillStyle=dark; cx.beginPath(); cx.ellipse(-30,-44,5,3,0,0,7); cx.fill();
+  if(robe){
+    cx.fillStyle=robe;
+    cx.beginPath(); cx.moveTo(-14,-58); cx.lineTo(10,-58); cx.lineTo(6,-34); cx.lineTo(-14,-34); cx.closePath(); cx.fill();
+    cx.beginPath(); cx.ellipse(-2,-68,9,10,0,0,7); cx.fill();
+    cx.fillStyle='#efe0bd'; cx.beginPath(); cx.ellipse(-2,-70,10,7,0,0,7); cx.fill();
+  }
+  cx.restore();
+}
+
+/* ---------- loop ---------- */
+let t0 = null, progress = 0, boost = 0;
+addEventListener('pointerdown', ()=>{ boost += 0.10; });
+
+function frame(ts){
+  if(t0===null) t0=ts;
+  progress = Math.min(1, (ts-t0)/TRIP_MS + boost);
+  const scroll = progress * 3400;
+
+  /* sky */
+  const g = cx.createLinearGradient(0,0,0,HORIZON+40);
+  g.addColorStop(0,DP.sky[0]); g.addColorStop(.62,DP.sky[1]); g.addColorStop(1,DP.sky[2]);
+  cx.fillStyle=g; cx.fillRect(0,0,Wd,HORIZON+40);
+
+  cx.fillStyle=DP.sun; cx.globalAlpha=.9;
+  cx.beginPath(); cx.arc(Wd*0.74, HORIZON*0.34, Math.min(Wd,Ht)*0.075, 0, 7); cx.fill();
+  cx.globalAlpha=1;
+  if(DP.name==='night'){ cx.fillStyle='#fff';
+    for(let i=0;i<40;i++){ const sx=(hash('s'+i)%1000)/1000*Wd, sy=(hash('y'+i)%1000)/1000*HORIZON*0.8;
+      cx.globalAlpha=.3+((i*37)%50)/100; cx.fillRect(sx,sy,2,2);} cx.globalAlpha=1; }
+
+  duneRidge(scroll*0.10, Ht*0.035, HORIZON-Ht*0.02, DP.sand[2], 1.5);
+  duneRidge(scroll*0.22, Ht*0.045, HORIZON+Ht*0.02, DP.sand[0], 0);
+
+  /* the destination, growing out of the haze */
+  const app = Math.max(0, (progress-0.30)/0.70);
+  if(app>0){
+    const s = 0.25 + app*app*1.25;
+    cx.globalAlpha = Math.min(1, 0.25+app*1.4);
+    landmark(KIND, Wd*0.5 + (1-app)*Wd*0.16, HORIZON + Ht*0.05 + app*Ht*0.10, s);
+    cx.globalAlpha = 1;
+  }
+
+  /* ground */
+  cx.fillStyle=DP.sand[1]; cx.fillRect(0,HORIZON+Ht*0.055,Wd,Ht);
+  duneRidge(scroll*0.55, Ht*0.02, HORIZON+Ht*0.10, DP.sand[0], 0);
+
+  /* haze band */
+  cx.save(); cx.globalAlpha=.5; cx.fillStyle=DP.haze; cx.filter='blur(9px)';
+  cx.fillRect(0,HORIZON-8,Wd,26); cx.restore();
+
+  const drawLayer = (props, speed, y, scale, col, dk)=>{
+    for(const p of props){
+      const x = Wd - ((p.x + scroll*speed) % 1600) ;
+      if(x>-80 && x<Wd+80) prop(p.k, x, y, p.s*scale, col, dk);
+    }
+  };
+  drawLayer(farProps, 0.30, HORIZON+Ht*0.045, 0.5, DP.sand[0], DP.sand[1]);
+  drawLayer(midProps, 0.65, HORIZON+Ht*0.13,  0.85,'#3f7f4a', '#6b4f30');
+
+  /* other travellers on the same road, ahead of you */
+  OTHERS.forEach((nm,i)=>{
+    const gy = HORIZON + Ht*0.16 + i*Ht*0.045;
+    const ox = Wd*0.62 - i*Wd*0.13 + Math.sin(ts/900+i)*4;
+    const sc = 0.5 + i*0.06;
+    camel(ox, gy, sc, '#b08a5c', '#7d5f3e', ts/150+i, i%2 ? '#6a3d6a' : '#3c5f8a');
+    cx.fillStyle='rgba(255,244,220,.92)'; cx.font=`${12+i}px system-ui`;
+    cx.textAlign='center'; cx.fillText(nm, ox, gy-70*sc);
+  });
+
+  drawLayer(nearProps, 1.15, HORIZON+Ht*0.30, 1.2, DP.sand[1], '#5c452c');
+
+  /* you */
+  const gy = HORIZON + Ht*0.34;
+  const bob = Math.sin(ts/140)*3;
+  cx.save(); cx.globalAlpha=.25; cx.fillStyle='#000';
+  cx.beginPath(); cx.ellipse(Wd*0.30, gy+4, 52, 10, 0, 0, 7); cx.fill(); cx.restore();
+  camel(Wd*0.30, gy+bob, 1.15, '#c39a68', '#8a6a46', ts/130, '#2c6b46');
+
+  /* dust kicked up behind */
+  cx.fillStyle='rgba(226,205,166,.5)';
+  for(let i=0;i<7;i++){
+    const px = Wd*0.30 - 30 - ((ts/6+i*40)%150);
+    const r = 3+((i*7)%6);
+    cx.beginPath(); cx.arc(px, gy-4-Math.sin(ts/200+i)*6, r, 0, 7); cx.fill();
+  }
+
+  if(DP.shade){ cx.fillStyle=`rgba(20,14,8,${DP.shade*0.35})`; cx.fillRect(0,0,Wd,Ht); }
+
+  document.getElementById('fill').style.width = (progress*100)+'%';
+
+  if(progress>=1){
+    document.getElementById('doneText').textContent = 'رسیدی به ' + TITLE;
+    document.getElementById('doneSub').textContent =
+      OTHERS.length ? 'اینجا هستند: ' + OTHERS.join('، ') : 'اینجا کسی نیست';
+    document.getElementById('done').style.display='flex';
+    document.getElementById('skip').style.display='none';
+    return;
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
