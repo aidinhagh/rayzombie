@@ -24,12 +24,21 @@
     background:#e8c579;color:#2b1d0e;font-weight:700}
   #skip{position:fixed;bottom:38px;inset-inline-start:14px;color:#fff3dc;opacity:.75;
     font-size:13px}
+  #warn{display:none;position:fixed;inset-inline:14px;top:44px;padding:9px 12px;
+    border-radius:10px;background:rgba(120,20,20,.88);color:#ffe9e0;font-size:13px;
+    text-align:center}
+  #dest{font-weight:700}
+  #signpost{position:fixed;inset-inline:0;top:50%;transform:translateY(-50%);
+    text-align:center;color:#fff6e2;font-size:20px;font-weight:700;opacity:0;
+    text-shadow:0 3px 10px rgba(0,0,0,.65);transition:opacity .6s;pointer-events:none}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <div id="hud"><span id="rider"></span><span id="dest"></span></div>
+<div id="signpost"></div>
 <div id="bar"><div id="fill"></div></div>
+<div id="warn"></div>
 <div id="skip">برای رسیدن سریع‌تر، ضربه بزن</div>
 <div id="done">
   <h1 id="doneText"></h1>
@@ -38,25 +47,70 @@
 </div>
 <script>
 const P = new URLSearchParams(location.search);
-const DEST  = P.get('to')   || 'oasis1';
-const KIND  = P.get('kind') || 'oasis';
-const TITLE = P.get('title')|| 'مقصد';
-const FROM  = P.get('from') || '';
-const RIDER = P.get('name') || 'مسافر';
-const OTHERS = (P.get('others')||'').split(',').filter(Boolean).slice(0,3);
-const TRIP_MS = 26000;
-
-document.getElementById('rider').textContent = '🐫 ' + RIDER;
-document.getElementById('dest').textContent  = (FROM ? FROM + ' ← ' : '') + TITLE;
-
 const tg = window.Telegram && window.Telegram.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
 function finish(){ if (tg) tg.close(); else history.back(); }
 
+let DEST='oasis1', KIND='oasis', TITLE='مقصد', FROM='', RIDER='مسافر', OTHERS=[];
+const TRIP_MS = 26000;
+
+/* Finding the token is the fiddly part. Telegram puts it in the query as
+   tgWebAppStartParam, and *sometimes* also in initDataUnsafe.start_param —
+   which is empty on some clients. The hash carries tgWebAppData too. Check
+   every one of them rather than trusting a single source. */
+function findToken(){
+  const hash = new URLSearchParams((location.hash||'').replace(/^#/,''));
+  return (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param)
+      || P.get('tgWebAppStartParam')
+      || hash.get('tgWebAppStartParam')
+      || P.get('startapp')
+      || P.get('t')
+      || '';
+}
+
+let DIAG = '';
+async function loadTrip(){
+  const token = findToken();
+  DIAG = 'token=' + (token || '—');
+  if (token){
+    try {
+      const r = await fetch('/trip/' + encodeURIComponent(token), {cache:'no-store'});
+      DIAG += ' http=' + r.status;
+      if (r.ok){
+        const d = await r.json();
+        DEST=d.to||DEST; KIND=d.kind||KIND; TITLE=d.title||TITLE;
+        FROM=d.from||''; RIDER=d.name||RIDER;
+        OTHERS=(d.others||[]).slice(0,3);
+        return;
+      }
+      warn(r.status===404 ? 'این سفر منقضی شده — دوباره /travel بزن'
+                          : 'سرور جواب نداد (' + r.status + ')');
+    } catch(e){ DIAG += ' err=' + e; warn('ارتباط با سرور برقرار نشد'); }
+  } else {
+    warn('کد سفر پیدا نشد');
+  }
+  /* plain query params still work when opened in a browser */
+  DEST  = P.get('to')   || DEST;
+  KIND  = P.get('kind') || KIND;
+  TITLE = P.get('title')|| TITLE;
+  FROM  = P.get('from') || '';
+  RIDER = P.get('name') || RIDER;
+  OTHERS = (P.get('others')||'').split(',').filter(Boolean).slice(0,3);
+}
+
+function warn(msg){
+  const el = document.getElementById('warn');
+  el.textContent = msg + (P.get('debug') ? ' · ' + DIAG : '');
+  el.style.display = 'block';
+}
+
 /* deterministic per-destination, so a place always looks like itself */
+let seed, rnd, DP;
+const farProps=[], midProps=[], nearProps=[];
+
 function hash(s){let h=2166136261;for(const ch of s){h^=ch.charCodeAt(0);h=Math.imul(h,16777619);}return h>>>0;}
 function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
-const seed = hash(DEST), rnd = mulberry(seed);
+
 
 /* ---------- scenery variety: time of day + palette ---------- */
 const DAYPARTS = [
@@ -65,7 +119,6 @@ const DAYPARTS = [
   {name:'dusk',  sky:['#6b4f86','#d1725f','#f6b877'], sun:'#ffd9a0', haze:'#e9ab84', sand:['#b98a5d','#8f6742','#e5c193'], shade:.42},
   {name:'night', sky:['#101a34','#25355c','#4a557d'], sun:'#e9eeff', haze:'#38456b', sand:['#6d6a72','#4b4750','#9b9392'], shade:.55},
 ];
-const DP = DAYPARTS[seed % DAYPARTS.length];
 const PROPS = ['palm','rock','cactus','tent','stones','bones'];
 
 const cv = document.getElementById('c'), cx = cv.getContext('2d');
@@ -78,11 +131,14 @@ function resize(){
 }
 addEventListener('resize', resize); resize();
 
-/* ---------- static scatter, generated once ---------- */
-const farProps=[], midProps=[], nearProps=[];
-for(let i=0;i<26;i++) farProps.push({x:rnd()*4000, k:PROPS[(rnd()*PROPS.length)|0], s:.35+rnd()*.25});
-for(let i=0;i<20;i++) midProps.push({x:rnd()*4000, k:PROPS[(rnd()*PROPS.length)|0], s:.6+rnd()*.35});
-for(let i=0;i<16;i++) nearProps.push({x:rnd()*4000, k:PROPS[(rnd()*PROPS.length)|0], s:1+rnd()*.5});
+/* ---------- static scatter, generated once the destination is known ------- */
+function seedWorld(){
+  seed = hash(DEST); rnd = mulberry(seed);
+  DP = DAYPARTS[seed % DAYPARTS.length];
+  for(let i=0;i<26;i++) farProps.push({x:rnd()*4000, k:PROPS[(rnd()*PROPS.length)|0], s:.35+rnd()*.25});
+  for(let i=0;i<20;i++) midProps.push({x:rnd()*4000, k:PROPS[(rnd()*PROPS.length)|0], s:.6+rnd()*.35});
+  for(let i=0;i<16;i++) nearProps.push({x:rnd()*4000, k:PROPS[(rnd()*PROPS.length)|0], s:1+rnd()*.5});
+}
 
 function duneRidge(off, amp, base, colour, blur){
   cx.save(); cx.fillStyle = colour; if(blur){cx.filter=`blur(${blur}px)`;}
@@ -252,7 +308,7 @@ function frame(ts){
   duneRidge(scroll*0.22, Ht*0.045, HORIZON+Ht*0.02, DP.sand[0], 0);
 
   /* the destination, growing out of the haze */
-  const app = Math.max(0, (progress-0.30)/0.70);
+  const app = Math.max(0, (progress-0.12)/0.88);
   if(app>0){
     const s = 0.25 + app*app*1.25;
     cx.globalAlpha = Math.min(1, 0.25+app*1.4);
@@ -318,7 +374,17 @@ function frame(ts){
   }
   requestAnimationFrame(frame);
 }
-requestAnimationFrame(frame);
+loadTrip().then(()=>{
+  document.getElementById('rider').textContent = '🐫 ' + RIDER;
+  document.getElementById('dest').textContent  = (FROM ? FROM + ' ← ' : '') + TITLE;
+  seedWorld();
+  resize();
+  const sp = document.getElementById('signpost');
+  sp.textContent = 'به سوی ' + TITLE;
+  sp.style.opacity = 1;
+  setTimeout(()=>{ sp.style.opacity = 0; }, 2600);
+  requestAnimationFrame(frame);
+});
 </script>
 </body>
 </html>
