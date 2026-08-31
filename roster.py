@@ -63,6 +63,12 @@ def _db() -> sqlite3.Connection:
             );
             CREATE INDEX IF NOT EXISTS votes_window
                 ON votes (chat_id, ts);
+            CREATE TABLE IF NOT EXISTS settings (
+                chat_id INTEGER NOT NULL,
+                key     TEXT NOT NULL,
+                value   TEXT,
+                PRIMARY KEY (chat_id, key)
+            );
             CREATE TABLE IF NOT EXISTS handles (
                 handle  TEXT PRIMARY KEY,
                 user_id INTEGER
@@ -279,4 +285,29 @@ def store_handle(handle: str, user_id: int | None) -> None:
             "INSERT OR REPLACE INTO handles (handle, user_id) VALUES (?,?)",
             (handle.lower(), user_id),
         )
+        _db().commit()
+
+
+# ------------------------------------------------------------ chat settings
+
+def get_setting(chat_id: int, key: str) -> str | None:
+    with _lock:
+        row = _db().execute(
+            "SELECT value FROM settings WHERE chat_id=? AND key=?",
+            (chat_id, key),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def set_setting(chat_id: int, key: str, value: str | None) -> None:
+    with _lock:
+        if value is None:
+            _db().execute("DELETE FROM settings WHERE chat_id=? AND key=?",
+                          (chat_id, key))
+        else:
+            _db().execute(
+                "INSERT INTO settings (chat_id, key, value) VALUES (?,?,?)"
+                " ON CONFLICT(chat_id, key) DO UPDATE SET value=excluded.value",
+                (chat_id, key, value),
+            )
         _db().commit()
