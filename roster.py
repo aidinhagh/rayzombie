@@ -63,6 +63,25 @@ def _db() -> sqlite3.Connection:
             );
             CREATE INDEX IF NOT EXISTS votes_window
                 ON votes (chat_id, ts);
+            CREATE TABLE IF NOT EXISTS players (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                name    TEXT,
+                place   TEXT,
+                updated REAL,
+                PRIMARY KEY (chat_id, user_id)
+            );
+            CREATE TABLE IF NOT EXISTS travels (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                name    TEXT,
+                place   TEXT,
+                origin  TEXT,
+                roll    INTEGER,
+                ts      REAL
+            );
+            CREATE INDEX IF NOT EXISTS travels_place
+                ON travels (chat_id, place, ts);
             CREATE TABLE IF NOT EXISTS settings (
                 chat_id INTEGER NOT NULL,
                 key     TEXT NOT NULL,
@@ -311,3 +330,76 @@ def set_setting(chat_id: int, key: str, value: str | None) -> None:
                 (chat_id, key, value),
             )
         _db().commit()
+
+
+# ------------------------------------------------------------ board position
+
+def get_place(chat_id: int, user_id: int) -> str | None:
+    with _lock:
+        row = _db().execute(
+            "SELECT place FROM players WHERE chat_id=? AND user_id=?",
+            (chat_id, user_id),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def set_place(chat_id: int, user_id: int, name: str, place: str) -> None:
+    with _lock:
+        _db().execute(
+            """INSERT INTO players (chat_id, user_id, name, place, updated)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(chat_id, user_id) DO UPDATE SET
+                 name=excluded.name, place=excluded.place,
+                 updated=excluded.updated""",
+            (chat_id, user_id, name, place, time.time()),
+        )
+        _db().commit()
+
+
+def log_travel(chat_id: int, user_id: int, name: str, place: str,
+               origin: str | None, roll: int | None) -> None:
+    with _lock:
+        _db().execute(
+            "INSERT INTO travels (chat_id, user_id, name, place, origin, roll, ts)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (chat_id, user_id, name, place, origin, roll, time.time()),
+        )
+        _db().commit()
+
+
+def all_players(chat_id: int) -> list[tuple[int, str, str, float]]:
+    with _lock:
+        return _db().execute(
+            """SELECT user_id, name, place, updated FROM players
+                WHERE chat_id=? ORDER BY updated DESC""",
+            (chat_id,),
+        ).fetchall()
+
+
+def others_at(chat_id: int, place: str, exclude: int, limit: int = 3
+              ) -> list[str]:
+    """Names of other players who have gone to the same place."""
+    with _lock:
+        rows = _db().execute(
+            """SELECT name FROM players
+                WHERE chat_id=? AND place=? AND user_id<>? AND name IS NOT NULL
+             ORDER BY updated DESC LIMIT ?""",
+            (chat_id, place, exclude, limit),
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+def clear_place(chat_id: int, user_id: int) -> int:
+    with _lock:
+        cur = _db().execute("DELETE FROM players WHERE chat_id=? AND user_id=?",
+                            (chat_id, user_id))
+        _db().commit()
+        return cur.rowcount
+
+
+def clear_all_places(chat_id: int) -> int:
+    with _lock:
+        cur = _db().execute("DELETE FROM players WHERE chat_id=?", (chat_id,))
+        _db().execute("DELETE FROM travels WHERE chat_id=?", (chat_id,))
+        _db().commit()
+        return cur.rowcount
