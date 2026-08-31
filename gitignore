@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+preview.gif
+still.png
+*.db
+*.db-wal
+*.db-shm
+.env
