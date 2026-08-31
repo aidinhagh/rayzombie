@@ -1052,11 +1052,11 @@ async def on_travel_button(update: Update,
 
     await query.answer(f"راهیِ {worldmap.name_of(arg)} شدی 🐫")
 
+    # Who is already there is deliberately NOT announced — you find that out by
+    # seeing them on the road during the ride.
     text = (f"🐫 <b>{name}</b> از "
             f"<b>{worldmap.describe(origin) if origin else 'ناکجا'}</b> "
             f"راهی <b>{worldmap.describe(arg)}</b> شد.")
-    if others:
-        text += "\nاینجا هستند: " + "، ".join(others)
 
     ride_token = secrets.token_urlsafe(8).replace("-", "_")
     await asyncio.to_thread(roster.save_trip, ride_token, json.dumps({
