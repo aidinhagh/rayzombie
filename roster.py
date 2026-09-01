@@ -87,6 +87,16 @@ def _db() -> sqlite3.Connection:
                 payload TEXT,
                 ts      REAL
             );
+            CREATE TABLE IF NOT EXISTS hunts (
+                token   TEXT PRIMARY KEY,
+                chat_id INTEGER,
+                user_id INTEGER,
+                name    TEXT,
+                animal  TEXT,
+                hit     INTEGER,
+                shots   INTEGER,
+                ts      REAL
+            );
             CREATE TABLE IF NOT EXISTS settings (
                 chat_id INTEGER NOT NULL,
                 key     TEXT NOT NULL,
@@ -448,3 +458,36 @@ def chats_for_user(user_id: int) -> list[int]:
             (user_id, user_id),
         ).fetchall()
     return [r[0] for r in rows]
+
+
+# ------------------------------------------------------------------- hunting
+
+def hunt_recorded(token: str) -> bool:
+    with _lock:
+        return _db().execute("SELECT 1 FROM hunts WHERE token=?",
+                             (token,)).fetchone() is not None
+
+
+def save_hunt(token: str, chat_id: int, user_id: int, name: str,
+              animal: str, hit: bool, shots: int) -> None:
+    with _lock:
+        _db().execute(
+            "INSERT OR REPLACE INTO hunts"
+            " (token, chat_id, user_id, name, animal, hit, shots, ts)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (token, chat_id, user_id, name, animal, 1 if hit else 0, shots,
+             time.time()),
+        )
+        _db().commit()
+
+
+def hunt_tally(chat_id: int, window: float = 7*24*3600):
+    """[(name, kills, attempts)] for the window, best first."""
+    since = time.time() - window
+    with _lock:
+        return _db().execute(
+            """SELECT name, SUM(hit), COUNT(*) FROM hunts
+                WHERE chat_id=? AND ts>=? GROUP BY user_id
+             ORDER BY 2 DESC, 3 ASC""",
+            (chat_id, since),
+        ).fetchall()
