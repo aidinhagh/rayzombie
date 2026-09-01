@@ -10,36 +10,61 @@
     font-family:system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif}
   canvas{display:block;width:100%;height:100%;touch-action:none}
   #hud{position:fixed;inset-inline:0;top:0;padding:10px 14px;color:#fff3dc;
-    text-shadow:0 2px 6px rgba(0,0,0,.7);display:flex;justify-content:space-between;
+    text-shadow:0 2px 6px rgba(0,0,0,.75);display:flex;justify-content:space-between;
     align-items:center;font-size:15px;pointer-events:none}
+  #dest{font-weight:700}
+  #weather{position:fixed;inset-inline:0;top:40px;text-align:center;color:#fff3dc;
+    font-size:13px;opacity:0;transition:opacity .8s;text-shadow:0 2px 8px rgba(0,0,0,.8);
+    pointer-events:none}
   #bar{position:fixed;inset-inline:14px;bottom:20px;height:8px;border-radius:99px;
     background:rgba(255,240,210,.25);overflow:hidden}
   #fill{height:100%;width:0;background:linear-gradient(90deg,#ffd98a,#ff9f43);
     transition:width .2s linear}
+  #signpost{position:fixed;inset-inline:0;top:46%;text-align:center;color:#fff6e2;
+    font-size:20px;font-weight:700;opacity:0;text-shadow:0 3px 10px rgba(0,0,0,.7);
+    transition:opacity .6s;pointer-events:none}
   #done{position:fixed;inset:0;display:none;flex-direction:column;gap:16px;
-    align-items:center;justify-content:center;background:rgba(12,10,8,.72);
+    align-items:center;justify-content:center;background:rgba(12,10,8,.74);
     color:#fff3dc;text-align:center;padding:24px}
   #done h1{font-size:26px;margin:0}
   #done button{font:inherit;font-size:16px;padding:12px 26px;border:0;border-radius:12px;
     background:#e8c579;color:#2b1d0e;font-weight:700}
-  #skip{position:fixed;bottom:38px;inset-inline-start:14px;color:#fff3dc;opacity:.75;
+  #skip{position:fixed;bottom:38px;inset-inline-start:14px;color:#fff3dc;opacity:.7;
     font-size:13px}
+  #hunt{display:none;position:fixed;inset-inline:0;bottom:56px;
+    flex-direction:column;align-items:center;gap:8px;pointer-events:none}
+  #quiver{color:#fff3dc;font-size:19px;letter-spacing:3px;
+    text-shadow:0 2px 6px rgba(0,0,0,.8)}
+  #draw{width:150px;height:7px;border-radius:99px;background:rgba(255,240,210,.28);
+    overflow:hidden}
+  #drawFill{height:100%;width:0;background:linear-gradient(90deg,#b7d98a,#ffd166,#ff7043)}
+  #bowBtn{pointer-events:auto;width:78px;height:78px;border-radius:50%;
+    background:rgba(30,22,14,.55);border:2px solid rgba(255,238,200,.75);
+    display:flex;align-items:center;justify-content:center;font-size:34px;
+    user-select:none;-webkit-user-select:none;touch-action:none}
+  #bowBtn.pull{background:rgba(120,40,20,.72);transform:scale(.94)}
+  #hunted{display:none;position:fixed;inset-inline:0;top:38%;text-align:center;
+    color:#fff6e2;font-size:24px;font-weight:700;pointer-events:none;
+    text-shadow:0 3px 12px rgba(0,0,0,.75)}
   #warn{display:none;position:fixed;inset-inline:14px;top:44px;padding:9px 12px;
     border-radius:10px;background:rgba(120,20,20,.88);color:#ffe9e0;font-size:13px;
     text-align:center}
-  #dest{font-weight:700}
-  #signpost{position:fixed;inset-inline:0;top:50%;transform:translateY(-50%);
-    text-align:center;color:#fff6e2;font-size:20px;font-weight:700;opacity:0;
-    text-shadow:0 3px 10px rgba(0,0,0,.65);transition:opacity .6s;pointer-events:none}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <div id="hud"><span id="rider"></span><span id="dest"></span></div>
-<div id="signpost"></div>
-<div id="bar"><div id="fill"></div></div>
+<div id="weather"></div>
 <div id="warn"></div>
-<div id="skip">برای رسیدن سریع‌تر، ضربه بزن</div>
+<div id="signpost"></div>
+<div id="skip">بکش تا اطراف را ببینی</div>
+<div id="hunt">
+  <div id="quiver"></div>
+  <div id="draw"><div id="drawFill"></div></div>
+  <div id="bowBtn">🏹</div>
+</div>
+<div id="hunted"></div>
+<div id="bar"><div id="fill"></div></div>
 <div id="done">
   <h1 id="doneText"></h1>
   <div id="doneSub" style="opacity:.8"></div>
@@ -52,23 +77,23 @@ if (tg) { tg.ready(); tg.expand(); }
 function finish(){ if (tg) tg.close(); else history.back(); }
 
 let DEST='oasis1', KIND='oasis', TITLE='مقصد', FROM='', RIDER='مسافر', OTHERS=[];
-const TRIP_MS = 26000;
+let DEST_QUARRY = 'deer';
+const TRIP_MS = 38000;
 
-/* Finding the token is the fiddly part. Telegram puts it in the query as
-   tgWebAppStartParam, and *sometimes* also in initDataUnsafe.start_param —
-   which is empty on some clients. The hash carries tgWebAppData too. Check
-   every one of them rather than trusting a single source. */
 function findToken(){
   const hash = new URLSearchParams((location.hash||'').replace(/^#/,''));
   return (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param)
-      || P.get('tgWebAppStartParam')
-      || hash.get('tgWebAppStartParam')
-      || P.get('startapp')
-      || P.get('t')
-      || '';
+      || P.get('tgWebAppStartParam') || hash.get('tgWebAppStartParam')
+      || P.get('startapp') || P.get('t') || '';
 }
 
 let DIAG = '';
+function warn(msg){
+  const el = document.getElementById('warn');
+  el.textContent = msg + (P.get('debug') ? ' · ' + DIAG : '');
+  el.style.display = 'block';
+}
+
 async function loadTrip(){
   const token = findToken();
   DIAG = 'token=' + (token || '—');
@@ -79,103 +104,389 @@ async function loadTrip(){
       if (r.ok){
         const d = await r.json();
         DEST=d.to||DEST; KIND=d.kind||KIND; TITLE=d.title||TITLE;
-        FROM=d.from||''; RIDER=d.name||RIDER;
-        OTHERS=(d.others||[]).slice(0,3);
+        FROM=d.from||''; RIDER=d.name||RIDER; OTHERS=(d.others||[]).slice(0,3);
+        DEST_QUARRY = d.quarry || DEST_QUARRY;
         return;
       }
       warn(r.status===404 ? 'این سفر منقضی شده — دوباره /travel بزن'
                           : 'سرور جواب نداد (' + r.status + ')');
     } catch(e){ DIAG += ' err=' + e; warn('ارتباط با سرور برقرار نشد'); }
-  } else {
-    warn('کد سفر پیدا نشد');
-  }
-  /* plain query params still work when opened in a browser */
-  DEST  = P.get('to')   || DEST;
-  KIND  = P.get('kind') || KIND;
-  TITLE = P.get('title')|| TITLE;
-  FROM  = P.get('from') || '';
-  RIDER = P.get('name') || RIDER;
-  OTHERS = (P.get('others')||'').split(',').filter(Boolean).slice(0,3);
+  } else { warn('کد سفر پیدا نشد'); }
+  DEST=P.get('to')||DEST; KIND=P.get('kind')||KIND; TITLE=P.get('title')||TITLE;
+  FROM=P.get('from')||''; RIDER=P.get('name')||RIDER;
+  OTHERS=(P.get('others')||'').split(',').filter(Boolean).slice(0,3);
+  DEST_QUARRY = P.get('quarry') || DEST_QUARRY;
 }
 
-function warn(msg){
-  const el = document.getElementById('warn');
-  el.textContent = msg + (P.get('debug') ? ' · ' + DIAG : '');
-  el.style.display = 'block';
-}
-
-/* deterministic per-destination, so a place always looks like itself */
-let seed, rnd, DP;
-const farProps=[], midProps=[], nearProps=[];
-
+/* deterministic per destination, so a place always looks like itself */
 function hash(s){let h=2166136261;for(const ch of s){h^=ch.charCodeAt(0);h=Math.imul(h,16777619);}return h>>>0;}
 function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
-
-
-/* ---------- scenery variety: time of day + palette ---------- */
-const DAYPARTS = [
-  {name:'dawn',  sky:['#f7b26a','#f6d9a6','#f9ead0'], sun:'#fff0c2', haze:'#f8dcb0', sand:['#d9ab68','#c4924f','#f3dcae'], shade:.30},
-  {name:'noon',  sky:['#79a2c8','#bcd2e2','#f4e2c0'], sun:'#fffbe8', haze:'#f2e2c2', sand:['#d8b075','#bb9155','#f7e6bd'], shade:.18},
-  {name:'dusk',  sky:['#6b4f86','#d1725f','#f6b877'], sun:'#ffd9a0', haze:'#e9ab84', sand:['#b98a5d','#8f6742','#e5c193'], shade:.42},
-  {name:'night', sky:['#101a34','#25355c','#4a557d'], sun:'#e9eeff', haze:'#38456b', sand:['#6d6a72','#4b4750','#9b9392'], shade:.55},
-];
-const PROPS = ['palm','rock','cactus','tent','stones','bones'];
+let seed, rnd;
 
 const cv = document.getElementById('c'), cx = cv.getContext('2d');
-let Wd=0, Ht=0, HORIZON=0;
+let Wd=0, Ht=0;
 function resize(){
-  const r = window.devicePixelRatio||1;
+  const r = Math.min(window.devicePixelRatio||1, 2);
   Wd = cv.clientWidth; Ht = cv.clientHeight;
   cv.width = Wd*r; cv.height = Ht*r; cx.setTransform(r,0,0,r,0,0);
-  HORIZON = Ht*0.46;
 }
-addEventListener('resize', resize); resize();
+addEventListener('resize', resize);
 
-/* ---------- static scatter, generated once the destination is known ------- */
-function seedWorld(){
-  seed = hash(DEST); rnd = mulberry(seed);
-  DP = DAYPARTS[seed % DAYPARTS.length];
-  for(let i=0;i<26;i++) farProps.push({x:rnd()*4000, k:PROPS[(rnd()*PROPS.length)|0], s:.35+rnd()*.25});
-  for(let i=0;i<20;i++) midProps.push({x:rnd()*4000, k:PROPS[(rnd()*PROPS.length)|0], s:.6+rnd()*.35});
-  for(let i=0;i<16;i++) nearProps.push({x:rnd()*4000, k:PROPS[(rnd()*PROPS.length)|0], s:1+rnd()*.5});
-}
+/* ======================= weather ======================= */
+const WEATHER = {
+  clear:    {fa:'آسمان صاف',        fog:1.1, fogCol:'#e8cfa2', sky:['#6f9ec6','#bcd4e6','#f3e2c2'], sun:'#fffbe8', tint:null,                 grit:0.15, wind:0.15},
+  hot:      {fa:'گرمای سوزان',      fog:1.7, fogCol:'#f0d7a4', sky:['#8fb0cc','#dfd8bd','#f8e6bc'], sun:'#fffdf0', tint:'rgba(255,215,140,.14)', grit:0.3,  wind:0.25},
+  dust:     {fa:'طوفان شن',         fog:5.5, fogCol:'#c9a06a', sky:['#b98f5c','#c9a068','#d9b681'], sun:'#e2c48f', tint:'rgba(190,140,80,.34)',  grit:1.0,  wind:1.0},
+  wind:     {fa:'باد و شن',         fog:2.6, fogCol:'#dbb987', sky:['#8ba7bd','#c9c2ab','#e9d7b0'], sun:'#f6ecd2', tint:'rgba(210,175,120,.16)', grit:0.6,  wind:0.7},
+  overcast: {fa:'ابری',             fog:2.0, fogCol:'#b9b3a6', sky:['#7c8592','#a9adaa','#cfc7b4'], sun:'#d8d4c6', tint:'rgba(120,120,120,.12)', grit:0.2,  wind:0.3},
+  rain:     {fa:'باران نادر بیابان', fog:2.8, fogCol:'#9aa3a4', sky:['#4a5866','#6d7a83','#9aa19b'], sun:'#c3cbc9', tint:'rgba(70,90,100,.22)',  grit:0.1,  wind:0.5, rain:true},
+  dusk:     {fa:'غروب',             fog:1.6, fogCol:'#d79a72', sky:['#6b4f86','#d1725f','#f6b877'], sun:'#ffd9a0', tint:'rgba(190,110,70,.16)',  grit:0.25, wind:0.2},
+  night:    {fa:'شب بیابان',        fog:2.2, fogCol:'#3a4260', sky:['#0d1730','#1e2c4e','#414c6e'], sun:'#e9eeff', tint:'rgba(20,28,55,.42)',   grit:0.15, wind:0.2, stars:true},
+};
+/* Weighted, so the common desert days are common. The destination picks from
+   this, which is why a place feels like itself every time you ride to it. */
+const WEATHER_ORDER = ['clear','clear','clear','clear','hot','hot','hot',
+                       'dusk','dusk','wind','wind','night','night',
+                       'overcast','dust','rain'];
 
-function duneRidge(off, amp, base, colour, blur){
-  cx.save(); cx.fillStyle = colour; if(blur){cx.filter=`blur(${blur}px)`;}
-  cx.beginPath(); cx.moveTo(-10, Ht);
-  for(let x=-10;x<=Wd+10;x+=8){
-    const t=(x+off)*0.0032;
-    const y = base + Math.sin(t)*amp + Math.sin(t*2.7+1.3)*amp*0.45 + Math.sin(t*0.6)*amp*0.7;
-    cx.lineTo(x,y);
+let startW, laterW = null, laterAt = 1.1, laterFor = 0;
+function pickWeather(){
+  /* the destination decides the base weather; the roll for a storm is fresh
+     every ride, so the same place is not always the same journey */
+  startW = WEATHER_ORDER[seed % WEATHER_ORDER.length];
+  laterW = null; laterAt = 1.1; laterFor = 0;      /* reset, or a storm sticks */
+  const roll = Math.random();
+  if (roll < 0.28){                       /* something rolls in mid-ride */
+    laterW = roll < 0.16 ? 'dust' : (roll < 0.22 ? 'wind' : 'rain');
+    laterAt = 0.25 + Math.random()*0.35;
+    laterFor = 0.25 + Math.random()*0.30;
   }
-  cx.lineTo(Wd+10, Ht); cx.closePath(); cx.fill(); cx.restore();
+}
+function weatherAt(p){
+  if (laterW && p >= laterAt && p <= laterAt + laterFor){
+    const into = Math.min(1, (p-laterAt)/0.10);
+    const out  = Math.min(1, (laterAt+laterFor-p)/0.10);
+    return {name: laterW, blend: Math.min(into, out)};
+  }
+  return {name: startW, blend: 0};
+}
+/* Accepts #abc, #aabbcc and rgb()/rgba() — mixCol feeds its own output back in
+   during a weather change, and a hex-only parser turned that into rgb(NaN,...). */
+function parseCol(c){
+  if(typeof c !== 'string') return [0,0,0];
+  c = c.trim();
+  if(c[0] === '#'){
+    if(c.length === 4) return [parseInt(c[1]+c[1],16), parseInt(c[2]+c[2],16),
+                               parseInt(c[3]+c[3],16)];
+    return [parseInt(c.slice(1,3),16), parseInt(c.slice(3,5),16),
+            parseInt(c.slice(5,7),16)];
+  }
+  const m = c.match(/-?[\d.]+/g);
+  return m ? [ +m[0]||0, +m[1]||0, +m[2]||0 ] : [0,0,0];
+}
+function mixCol(a,b,t){
+  const pa = parseCol(a), pb = parseCol(b);
+  t = Math.max(0, Math.min(1, t)) || 0;
+  return 'rgb(' + pa.map((v,i)=>
+    Math.round(Math.max(0, Math.min(255, v + (pb[i]-v)*t)))).join(',') + ')';
+}
+let W = WEATHER.clear, Wblend = 0, Wbase = WEATHER.clear;
+function currentWeather(p){
+  const at = weatherAt(p);
+  Wbase = WEATHER[startW];
+  const target = WEATHER[at.name];
+  Wblend = at.blend;
+  W = at.blend > 0 ? target : Wbase;
+  return at;
+}
+function lerp(a,b,t){ return a+(b-a)*t; }
+function fogNow(){ return lerp(Wbase.fog, W.fog, Wblend || (W===Wbase?0:1)); }
+function fogColNow(){ return Wblend>0 ? mixCol(Wbase.fogCol, W.fogCol, Wblend) : W.fogCol; }
+
+
+/* ======================= pseudo-3D road =======================
+   Segments are projected once per frame, then everything is painted far to
+   near. The terrain either side is three ridge lines per side at increasing
+   lateral distance — one filled path each, rather than a polygon per segment,
+   which is what keeps ~110 segments of dunes affordable on a phone.
+*/
+const SEG_LEN = 200, ROAD_W = 2200, RUMBLE = 6, DRAW_DIST = 78;
+const FOV = 100, CAM_H = 1350;
+const camDepth = 1/Math.tan((FOV/2)*Math.PI/180);
+
+/* One sand palette drives the dunes, the verge and the road, so the whole
+   scene shares a light direction instead of each piece having its own. */
+const SAND = {
+  lit:       '#e2c08a',
+  midLit:    '#cba874',
+  shade:     '#c4a271',
+  midShade:  '#ae8a5c',
+  deep:      '#8e6d45',
+  road:      '#d9b47f',
+  roadDark:  '#cfa872',
+  verge:     '#bb9560',
+};
+
+/* Lateral offset and height. Real dunes are wide and low — the earlier three
+   bands were tall and short-wavelength, which is exactly how you get a row of
+   pyramids. Six shallow bands with long wavelengths read as rolling sand. */
+/* A ridge is filled from its crest down to the bottom of the screen, so a
+   band that is both close and tall projects as a wall across the whole side
+   of the frame. Keeping every band far out and low means the crest line stays
+   near the horizon: the desert reads as flat, with dunes as gentle swells in
+   the distance rather than canyon sides. */
+const BANDS = [
+  {x: 38.0*ROAD_W, amp: 1350, freq: 0.0075},
+  {x: 24.0*ROAD_W, amp:  820, freq: 0.011},
+  {x: 15.0*ROAD_W, amp:  430, freq: 0.016},
+  {x:  9.5*ROAD_W, amp:  190, freq: 0.023},
+];
+
+let segments = [], trackLength = 0;
+
+function lastY(){ return segments.length===0 ? 0 : segments[segments.length-1].p2.world.y; }
+
+/* Four octaves, each half the amplitude and roughly double the frequency of
+   the last. One or two octaves gives a sine wave; four gives crests, saddles
+   and long flats the way wind-built sand actually lies. */
+function fbm(t){
+  return (Math.sin(t)*0.50
+        + Math.sin(t*2.13 + 1.7)*0.25
+        + Math.sin(t*4.31 + 4.1)*0.145
+        + Math.sin(t*8.07 + 2.4)*0.075);
 }
 
-/* ---------- props ---------- */
-function prop(k,x,y,s,col,dark){
-  cx.save(); cx.translate(x,y); cx.scale(s,s); cx.fillStyle=col;
+function duneHeights(n){
+  const out = [[],[]];
+  for(let s=0;s<2;s++){
+    const side = s===0 ? -1 : 1;
+    for(let b=0;b<BANDS.length;b++){
+      const t = n*BANDS[b].freq + side*13.7 + b*29.3;
+      let h = fbm(t)*0.5 + 0.5;                       /* 0..1 */
+      h = h*h*(3-2*h);                                /* flatten the troughs */
+      out[s].push(BANDS[b].amp * (0.30 + h*0.80));
+    }
+  }
+  return out;
+}
+
+/* Per-segment wander, so the track's edges are never two straight rails */
+function trackWobble(n){
+  return {
+    w:  1 + fbm(n*0.09 + 3.1)*0.16,          /* width varies ±16% */
+    dx: fbm(n*0.055 + 8.7)*0.075,            /* and it drifts side to side */
+    tone: fbm(n*0.14 + 1.3)*0.5 + 0.5,       /* patchy, unevenly worn dirt */
+  };
+}
+
+function addSegment(curve, y){
+  const n = segments.length;
+  segments.push({
+    index: n,
+    p1: {world:{y:lastY(), z:n*SEG_LEN}, camera:{}, screen:{}},
+    p2: {world:{y:y, z:(n+1)*SEG_LEN}, camera:{}, screen:{}},
+    curve: curve,
+    sprites: [],
+    dune: duneHeights(n),
+    wob: trackWobble(n),
+  });
+}
+function easeIn(a,b,p){ return a+(b-a)*Math.pow(p,2); }
+function easeInOut(a,b,p){ return a+(b-a)*(-Math.cos(p*Math.PI)/2+0.5); }
+function addRoad(enter, hold, leave, curve, y){
+  const start = lastY(), end = start + y*SEG_LEN;
+  const total = enter+hold+leave;
+  for(let i=0;i<enter;i++) addSegment(easeIn(0,curve,i/enter),  easeInOut(start,end,i/total));
+  for(let i=0;i<hold;i++)  addSegment(curve,                    easeInOut(start,end,(enter+i)/total));
+  for(let i=0;i<leave;i++) addSegment(easeIn(curve,0,i/leave),  easeInOut(start,end,(enter+hold+i)/total));
+}
+
+function buildTrack(){
+  segments = [];
+  addRoad(28, 34, 28, 0, 0);
+  const pieces = 10 + (seed % 5);
+  for(let i=0;i<pieces;i++){
+    const curve = (rnd()<0.5?-1:1) * (1.8 + rnd()*4.6);
+    const hill  = (rnd()-0.46) * 20;            /* long shallow rises, not cliffs */
+    const len   = 24 + Math.floor(rnd()*34);
+    if (rnd() < 0.26) addRoad(len, len, len, 0, hill);
+    else              addRoad(len, len, len, curve, hill);
+  }
+  addRoad(34, 52, 34, 0, -8);
+  trackLength = segments.length * SEG_LEN;
+  scatterProps();
+}
+
+function findSegment(z){ return segments[Math.min(segments.length-1, Math.floor(z/SEG_LEN))]; }
+
+/* Yaw and pitch shift the projected image by a constant amount at every
+   depth — that falls out of the pinhole projection, so no extra maths per
+   point and the perspective stays correct. */
+let viewShiftX = 0, viewShiftY = 0;
+
+function project(p, camX, camY, camZ, w, h){
+  p.camera.x = (p.world.x||0) - camX;
+  p.camera.y = (p.world.y||0) - camY;
+  p.camera.z = (p.world.z||0) - camZ;
+  p.screen.scale = camDepth/Math.max(1, p.camera.z);
+  p.screen.x = (w/2) + (p.screen.scale * p.camera.x * w/2) + viewShiftX;
+  p.screen.y = (h/2) - (p.screen.scale * p.camera.y * h/2) + viewShiftY;
+  p.screen.w = (p.screen.scale * ROAD_W * w/2);
+}
+
+function quad(x1,y1,w1,x2,y2,w2,colour){
+  cx.fillStyle = colour;
+  cx.beginPath();
+  cx.moveTo(x1-w1,y1); cx.lineTo(x2-w2,y2); cx.lineTo(x2+w2,y2); cx.lineTo(x1+w1,y1);
+  cx.closePath(); cx.fill();
+}
+
+/* ======================= roadside ======================= */
+const PROP_KINDS = ['palm','rock','cactus','tent','stones','bones','dunegrass'];
+
+function scatterProps(){
+  for(let n=18;n<segments.length-26;n++){
+    if (rnd() < 0.26){
+      segments[n].sprites.push({
+        type:'prop',
+        kind: PROP_KINDS[(rnd()*PROP_KINDS.length)|0],
+        offset: (rnd()<0.5?-1:1)*(1.35 + rnd()*3.0),
+        scale: 0.75 + rnd()*1.0,
+        flip: rnd()<0.5,
+      });
+    }
+  }
+  segments[segments.length-16].sprites.push({type:'landmark', offset:0, scale:1});
+}
+
+function groundShadow(x, y, w, h, a){
+  cx.save(); cx.globalAlpha = a; cx.fillStyle = '#4a3520';
+  cx.beginPath(); cx.ellipse(x, y, w, h, 0, 0, 7); cx.fill(); cx.restore();
+}
+
+function prop(k,x,y,s,flip){
+  cx.save(); cx.translate(x,y); cx.scale(flip?-s:s, s);
   if(k==='palm'){
-    cx.fillStyle=dark; cx.fillRect(-3,-46,6,46);
-    cx.fillStyle=col;
-    for(let i=0;i<6;i++){const a=-Math.PI/2 + (i-2.5)*0.42;
-      cx.beginPath(); cx.ellipse(Math.cos(a)*20, -46+Math.sin(a)*14, 22, 6, a, 0, 7); cx.fill();}
+    groundShadow(6, 1, 26, 6, .28);
+    const g = cx.createLinearGradient(-4,-56,6,0);
+    g.addColorStop(0,'#8a6b42'); g.addColorStop(1,'#5d4529');
+    cx.fillStyle=g;
+    cx.beginPath(); cx.moveTo(-4,0); cx.quadraticCurveTo(-1,-30,-7,-56);
+    cx.lineTo(1,-57); cx.quadraticCurveTo(6,-30,4,0); cx.closePath(); cx.fill();
+    for(let i=0;i<7;i++){
+      const a = -Math.PI/2 + (i-3)*0.40, len = 24+(i%2)*6;
+      const gg = cx.createLinearGradient(0,-56,Math.cos(a)*len,-56+Math.sin(a)*len);
+      gg.addColorStop(0,'#4a8a4e'); gg.addColorStop(1,'#2c5c33');
+      cx.fillStyle=gg;
+      cx.beginPath();
+      cx.moveTo(-6,-56);
+      cx.quadraticCurveTo(Math.cos(a)*len*0.6-2, -58+Math.sin(a)*len*0.5,
+                          Math.cos(a)*len, -54+Math.sin(a)*len);
+      cx.quadraticCurveTo(Math.cos(a)*len*0.6+3, -52+Math.sin(a)*len*0.5, -6,-52);
+      cx.closePath(); cx.fill();
+    }
+    cx.fillStyle='#7a5a2e';
+    cx.beginPath(); cx.arc(-2,-52,4,0,7); cx.arc(4,-50,3,0,7); cx.fill();
   } else if(k==='rock'){
-    cx.beginPath(); cx.moveTo(-16,0); cx.lineTo(-6,-16); cx.lineTo(8,-13);
-    cx.lineTo(17,0); cx.closePath(); cx.fill();
+    groundShadow(4, 1, 20, 5, .30);
+    const g = cx.createLinearGradient(-16,-18,14,2);
+    g.addColorStop(0,'#b39a76'); g.addColorStop(.5,'#8d7454'); g.addColorStop(1,'#6b573c');
+    cx.fillStyle=g;
+    cx.beginPath(); cx.moveTo(-17,0); cx.lineTo(-9,-13); cx.lineTo(-2,-18);
+    cx.lineTo(9,-14); cx.lineTo(17,-3); cx.lineTo(15,0); cx.closePath(); cx.fill();
+    cx.fillStyle='rgba(255,238,200,.35)';
+    cx.beginPath(); cx.moveTo(-9,-13); cx.lineTo(-2,-18); cx.lineTo(3,-13);
+    cx.closePath(); cx.fill();
   } else if(k==='cactus'){
-    cx.fillRect(-4,-34,8,34); cx.fillRect(-14,-24,10,5); cx.fillRect(-14,-24,5,14);
-    cx.fillRect(4,-29,10,5); cx.fillRect(9,-29,5,12);
+    groundShadow(4, 1, 14, 4, .28);
+    const g = cx.createLinearGradient(-6,0,7,0);
+    g.addColorStop(0,'#3f7f4a'); g.addColorStop(.6,'#2f6539'); g.addColorStop(1,'#24512c');
+    cx.fillStyle=g;
+    cx.beginPath(); cx.moveTo(-5,0); cx.lineTo(-5,-30);
+    cx.quadraticCurveTo(-5,-38,0,-38); cx.quadraticCurveTo(5,-38,5,-30);
+    cx.lineTo(5,0); cx.closePath(); cx.fill();
+    cx.beginPath(); cx.moveTo(-5,-20); cx.lineTo(-13,-20);
+    cx.quadraticCurveTo(-17,-20,-17,-26); cx.lineTo(-17,-32); cx.lineTo(-12,-32);
+    cx.lineTo(-12,-25); cx.lineTo(-5,-25); cx.closePath(); cx.fill();
   } else if(k==='tent'){
-    cx.beginPath(); cx.moveTo(-24,0); cx.lineTo(0,-26); cx.lineTo(24,0); cx.closePath(); cx.fill();
-    cx.fillStyle=dark; cx.beginPath(); cx.moveTo(-4,0); cx.lineTo(0,-26); cx.lineTo(4,0); cx.closePath(); cx.fill();
+    groundShadow(6, 1, 28, 6, .30);
+    const g = cx.createLinearGradient(-24,0,24,0);
+    g.addColorStop(0,'#6f5333'); g.addColorStop(.45,'#8a6a44'); g.addColorStop(1,'#57402a');
+    cx.fillStyle=g;
+    cx.beginPath(); cx.moveTo(-26,0); cx.quadraticCurveTo(-12,-22,0,-28);
+    cx.quadraticCurveTo(12,-22,26,0); cx.closePath(); cx.fill();
+    cx.fillStyle='#2b1f12';
+    cx.beginPath(); cx.moveTo(-6,0); cx.quadraticCurveTo(-4,-14,0,-17);
+    cx.quadraticCurveTo(4,-14,6,0); cx.closePath(); cx.fill();
   } else if(k==='stones'){
-    for(let i=-2;i<=2;i++){cx.beginPath();cx.ellipse(i*11,0,6,4,0,0,7);cx.fill();}
-  } else {                                   /* bones */
-    cx.fillRect(-18,-3,36,4); cx.beginPath(); cx.arc(-18,-1,5,0,7); cx.arc(18,-1,5,0,7); cx.fill();
+    groundShadow(0, 1, 24, 4, .22);
+    for(let i=-2;i<=2;i++){
+      const g = cx.createLinearGradient(i*11,-8,i*11+5,2);
+      g.addColorStop(0,'#a8906c'); g.addColorStop(1,'#6f5b3f');
+      cx.fillStyle=g;
+      cx.beginPath(); cx.ellipse(i*11,-2,6+(i%2),5,0,0,7); cx.fill();
+    }
+  } else if(k==='bones'){
+    groundShadow(0, 1, 22, 4, .18);
+    cx.fillStyle='#e6dcc4';
+    cx.beginPath(); cx.ellipse(0,-2,18,4,0.06,0,7); cx.fill();
+    cx.beginPath(); cx.arc(-18,-3,5,0,7); cx.arc(18,-1,5,0,7); cx.fill();
+    cx.fillStyle='#c9bda0';
+    cx.beginPath(); cx.ellipse(-4,-1,9,2,0.06,0,7); cx.fill();
+  } else {                                        /* dune grass */
+    for(let i=-3;i<=3;i++){
+      cx.strokeStyle = i%2 ? '#8f8a4e' : '#a39a5c';
+      cx.lineWidth = 1.6;
+      cx.beginPath(); cx.moveTo(i*3,0);
+      cx.quadraticCurveTo(i*3+i*2, -9, i*3+i*5, -16); cx.stroke();
+    }
   }
   cx.restore();
 }
 
+/* a camel from behind, which is what you see when following someone */
+function camelRear(x, y, s, robe){
+  cx.save(); cx.translate(x,y); cx.scale(s,s);
+  groundShadow(0, 4, 34, 9, .32);
+
+  const hide = cx.createLinearGradient(-28,-70,26,-20);
+  hide.addColorStop(0,'#d3a97a');
+  hide.addColorStop(.45,'#b98f60'); hide.addColorStop(1,'#8a6740');
+
+  cx.strokeStyle='#8a6740'; cx.lineWidth=8; cx.lineCap='round';
+  cx.beginPath(); cx.moveTo(-14,-32); cx.quadraticCurveTo(-18,-14,-16,2);
+  cx.moveTo(14,-32); cx.quadraticCurveTo(18,-14,16,2); cx.stroke();
+  cx.fillStyle='#6f522f';
+  cx.beginPath(); cx.ellipse(-16,3,6,3,0,0,7); cx.ellipse(16,3,6,3,0,0,7); cx.fill();
+
+  cx.fillStyle=hide;
+  cx.beginPath(); cx.ellipse(0,-46,26,24,0,0,7); cx.fill();
+  cx.beginPath(); cx.ellipse(-1,-68,16,15,0,0,7); cx.fill();
+  cx.fillStyle='rgba(255,235,195,.30)';
+  cx.beginPath(); cx.ellipse(-9,-70,7,9,-0.3,0,7); cx.fill();
+  cx.fillStyle='rgba(60,40,22,.22)';
+  cx.beginPath(); cx.ellipse(12,-52,9,16,-0.2,0,7); cx.fill();
+
+  cx.strokeStyle='#8a6740'; cx.lineWidth=4;
+  cx.beginPath(); cx.moveTo(0,-44); cx.quadraticCurveTo(4,-32,2,-20); cx.stroke();
+
+  if(robe){
+    const rg = cx.createLinearGradient(-16,-92,16,-56);
+    rg.addColorStop(0, robe); rg.addColorStop(1, 'rgba(0,0,0,.45)');
+    cx.fillStyle='#7a5c34';
+    cx.beginPath(); cx.ellipse(0,-74,19,9,0,0,7); cx.fill();       /* saddle */
+    cx.fillStyle=rg;
+    cx.beginPath(); cx.moveTo(-14,-90); cx.quadraticCurveTo(0,-95,14,-90);
+    cx.lineTo(18,-60); cx.quadraticCurveTo(0,-54,-18,-60); cx.closePath(); cx.fill();
+    cx.fillStyle='#efe0bd';
+    cx.beginPath(); cx.ellipse(0,-99,10,10,0,0,7); cx.fill();
+    cx.fillStyle='rgba(80,60,30,.35)';
+    cx.beginPath(); cx.ellipse(4,-99,6,10,0,0,7); cx.fill();
+    cx.fillStyle=robe;
+    cx.beginPath(); cx.ellipse(0,-104,11,5,0,0,7); cx.fill();
+  }
+  cx.restore();
+}
 /* ---------- the landmark you are riding towards ---------- */
 function landmark(kind, x, groundY, s){
   cx.save(); cx.translate(x, groundY); cx.scale(s,s);
@@ -259,152 +570,881 @@ function landmark(kind, x, groundY, s){
   cx.restore();
 }
 
-/* ---------- camel and rider ---------- */
-function camel(x, groundY, s, body, dark, walk, robe){
-  cx.save(); cx.translate(x, groundY); cx.scale(s,s);
-  const sw = Math.sin(walk), sw2 = Math.sin(walk+2.1);
-  cx.strokeStyle=dark; cx.lineWidth=6; cx.lineCap='round';
-  for(const [px,ph] of [[-16,sw],[-10,sw2],[14,sw2],[20,sw]]){
-    cx.beginPath(); cx.moveTo(px,-34); cx.lineTo(px+ph*7,-16); cx.lineTo(px+ph*10,0); cx.stroke();
-  }
+
+
+/* ======================= your own camel ======================= */
+function povCamel(t, sway){
+  const gait = t/175;
+  const bob = Math.sin(gait)*8 + Math.sin(gait*2)*3;
+  const roll = Math.sin(gait/2)*0.022 + sway*0.30;
+  cx.save();
+  cx.translate(Wd/2, Ht + bob);
+  cx.rotate(roll);
+  const s = Math.min(Wd, Ht)/420;
+  cx.scale(s, s);
+
+  /* shoulders filling the bottom of the frame */
+  const body = cx.createRadialGradient(-40,20,20, 0,60,260);
+  body.addColorStop(0,'#d8ad78'); body.addColorStop(.55,'#c09468');
+  body.addColorStop(1,'#8e6b45');
   cx.fillStyle=body;
-  cx.beginPath(); cx.ellipse(0,-42,30,15,0,0,7); cx.fill();
-  cx.beginPath(); cx.ellipse(-2,-54,13,11,0,0,7); cx.fill();          /* hump */
-  cx.beginPath(); cx.moveTo(22,-46); cx.quadraticCurveTo(38,-56,36,-72); cx.lineTo(30,-72);
-  cx.quadraticCurveTo(30,-56,17,-40); cx.closePath(); cx.fill();       /* neck */
-  cx.beginPath(); cx.ellipse(35,-75,10,6,-0.3,0,7); cx.fill();         /* head */
-  cx.fillStyle=dark; cx.beginPath(); cx.ellipse(-30,-44,5,3,0,0,7); cx.fill();
-  if(robe){
-    cx.fillStyle=robe;
-    cx.beginPath(); cx.moveTo(-14,-58); cx.lineTo(10,-58); cx.lineTo(6,-34); cx.lineTo(-14,-34); cx.closePath(); cx.fill();
-    cx.beginPath(); cx.ellipse(-2,-68,9,10,0,0,7); cx.fill();
-    cx.fillStyle='#efe0bd'; cx.beginPath(); cx.ellipse(-2,-70,10,7,0,0,7); cx.fill();
+  cx.beginPath(); cx.ellipse(0, 62, 268, 142, 0, 0, 7); cx.fill();
+
+  /* hump, just in front of the saddle */
+  const hump = cx.createLinearGradient(-60,-30,60,30);
+  hump.addColorStop(0,'#c99f70'); hump.addColorStop(1,'#96724a');
+  cx.fillStyle=hump;
+  cx.beginPath(); cx.ellipse(0, 2, 86, 44, 0, 0, 7); cx.fill();
+
+  /* blanket and saddle horn */
+  cx.fillStyle='#7d3f3f';
+  cx.beginPath(); cx.moveTo(-96,44); cx.quadraticCurveTo(0,10,96,44);
+  cx.lineTo(104,86); cx.quadraticCurveTo(0,54,-104,86); cx.closePath(); cx.fill();
+  cx.fillStyle='#e0c37e';
+  cx.beginPath(); cx.moveTo(-96,60); cx.quadraticCurveTo(0,28,96,60);
+  cx.lineTo(98,70); cx.quadraticCurveTo(0,38,-98,70); cx.closePath(); cx.fill();
+
+  /* neck away from the camera, swinging with the gait */
+  const nx = Math.sin(gait*0.5)*10;
+  const neck = cx.createLinearGradient(-34,-10,34,-10);
+  neck.addColorStop(0,'#a87f52'); neck.addColorStop(.4,'#cda274'); neck.addColorStop(1,'#8e6b45');
+  cx.fillStyle=neck;
+  cx.beginPath();
+  cx.moveTo(-62,-2);
+  cx.quadraticCurveTo(-46+nx,-72,-27+nx,-120);
+  cx.lineTo(27+nx,-120);
+  cx.quadraticCurveTo(46+nx,-72,62,-2);
+  cx.closePath(); cx.fill();
+  cx.fillStyle='rgba(255,238,205,.22)';
+  cx.beginPath();
+  cx.moveTo(-54,-6); cx.quadraticCurveTo(-40+nx,-72,-24+nx,-118);
+  cx.lineTo(-10+nx,-118); cx.quadraticCurveTo(-26+nx,-72,-36,-6);
+  cx.closePath(); cx.fill();
+
+  /* head, seen from behind and slightly below */
+  cx.fillStyle='#b98f60';
+  cx.beginPath(); cx.ellipse(nx,-130, 30, 21, 0, 0, 7); cx.fill();
+  cx.beginPath(); cx.ellipse(nx,-146, 20, 13, 0, 0, 7); cx.fill();
+  cx.fillStyle='#8e6b45';
+  cx.beginPath(); cx.ellipse(nx-21,-152, 6, 10, -0.4, 0, 7);
+  cx.ellipse(nx+21,-152, 6, 10, 0.4, 0, 7); cx.fill();
+  cx.fillStyle='rgba(255,240,210,.22)';
+  cx.beginPath(); cx.ellipse(nx-11,-134, 11, 14, -0.2, 0, 7); cx.fill();
+
+  /* headstall and reins running back to your hands */
+  cx.strokeStyle='#5d3f22'; cx.lineWidth=5; cx.lineCap='round';
+  cx.beginPath();
+  cx.moveTo(nx-26,-128); cx.quadraticCurveTo(-104,-60,-166,30);
+  cx.moveTo(nx+26,-128); cx.quadraticCurveTo(104,-60,166,30);
+  cx.stroke();
+  cx.strokeStyle='#8a5f34'; cx.lineWidth=3;
+  cx.beginPath(); cx.moveTo(nx-27,-136); cx.lineTo(nx+27,-136); cx.stroke();
+  cx.restore();
+}
+
+/* ======================= surface texture =======================
+   Flat fills are what read as "cartoon" more than anything else. A single
+   128px noise tile, generated once and laid over the ground with a low alpha,
+   breaks up every large area for the cost of one fillRect. */
+let grainPattern = null;
+function buildGrain(){
+  const t = document.createElement('canvas');
+  t.width = t.height = 128;
+  const g = t.getContext('2d');
+  const img = g.createImageData(128,128);
+  for(let i=0;i<128*128;i++){
+    const v = 118 + Math.random()*74;
+    const clump = Math.random() < 0.06 ? -34 : 0;      /* coarser grains */
+    img.data[i*4] = img.data[i*4+1] = img.data[i*4+2] = v + clump;
+    img.data[i*4+3] = 255;
+  }
+  g.putImageData(img,0,0);
+  grainPattern = cx.createPattern(t, 'repeat');
+}
+
+function drawGrain(fromY, alpha){
+  if(!grainPattern) return;
+  cx.save();
+  cx.globalCompositeOperation = 'overlay';
+  cx.globalAlpha = alpha;
+  cx.fillStyle = grainPattern;
+  cx.fillRect(0, fromY, Wd, Ht-fromY);
+  cx.restore();
+}
+
+/* ======================= weather effects ======================= */
+const motes = [];
+for(let i=0;i<240;i++) motes.push({x:Math.random(), y:Math.random(),
+  z:0.2+Math.random()*0.8, sp:0.5+Math.random()*1.5, ph:Math.random()*7});
+
+function drawGrit(t, strength){
+  if(strength<=0.02) return;
+  cx.save();
+  for(const m of motes){
+    const speed = m.sp*(0.4+strength*3.4);
+    const x = ((m.x + t/1000*speed) % 1.2 - 0.1) * Wd;
+    const y = ((m.y + Math.sin(t/700+m.ph)*0.02) % 1) * Ht;
+    const r = m.z*(1+strength*2.6);
+    cx.globalAlpha = Math.min(0.85, m.z*strength*0.85);
+    cx.fillStyle = '#f0dcb4';
+    if(strength>0.5) cx.fillRect(x, y, r*11*strength, r*0.9);
+    else { cx.beginPath(); cx.arc(x, y, r, 0, 7); cx.fill(); }
+  }
+  cx.restore(); cx.globalAlpha=1;
+}
+
+function drawRain(t){
+  cx.save(); cx.strokeStyle='rgba(196,214,220,.5)'; cx.lineWidth=1.4;
+  for(let i=0;i<140;i++){
+    const x = ((i*97 + t*0.6) % (Wd+120)) - 60;
+    const y = ((i*61 + t*1.9) % (Ht+80)) - 40;
+    cx.beginPath(); cx.moveTo(x,y); cx.lineTo(x-7,y+18); cx.stroke();
   }
   cx.restore();
 }
 
-/* ---------- loop ---------- */
-/* one lane per traveller, fixed at load so they don't jitter between frames */
-let RIDER_LANES = [];
+let clouds = null;
+function drawSky(t, horizonY){
+  const g = cx.createLinearGradient(0,0,0,Math.max(40,horizonY)+50);
+  const s = W.sky, b = Wbase.sky;
+  g.addColorStop(0,   Wblend>0 ? mixCol(b[0],s[0],Wblend) : s[0]);
+  g.addColorStop(.60, Wblend>0 ? mixCol(b[1],s[1],Wblend) : s[1]);
+  g.addColorStop(1,   Wblend>0 ? mixCol(b[2],s[2],Wblend) : s[2]);
+  cx.fillStyle=g; cx.fillRect(0,0,Wd,Ht);
+
+  if(W.stars){
+    cx.fillStyle='#fff';
+    for(let i=0;i<50;i++){
+      cx.globalAlpha = .25 + ((i*37)%60)/100;
+      cx.fillRect((hash('s'+i)%1000)/1000*Wd, (hash('y'+i)%1000)/1000*horizonY*0.85, 2, 2);
+    }
+    cx.globalAlpha=1;
+  }
+
+  cx.globalAlpha = W===WEATHER.dust ? .30 : .8;
+  const sx = Wd*0.72 + viewShiftX*0.9, sy = Math.max(-40, horizonY*0.38),
+        sr = Math.min(Wd,Ht)*0.065;
+  const glow = cx.createRadialGradient(sx,sy,sr*0.4, sx,sy,sr*4.5);
+  glow.addColorStop(0, W.sun); glow.addColorStop(1, 'rgba(255,240,200,0)');
+  cx.fillStyle=glow; cx.beginPath(); cx.arc(sx,sy,sr*4.5,0,7); cx.fill();
+  cx.fillStyle=W.sun; cx.beginPath(); cx.arc(sx,sy,sr,0,7); cx.fill();
+  cx.globalAlpha=1;
+
+  if(!clouds){
+    clouds = [];
+    for(let i=0;i<7;i++) clouds.push({x:rnd(), y:0.10+rnd()*0.42, s:0.5+rnd()*1.1, v:0.004+rnd()*0.012});
+  }
+  const cloudAlpha = W===WEATHER.overcast ? .55 : (W===WEATHER.rain ? .6 : .22);
+  cx.save(); cx.globalAlpha = cloudAlpha;
+  cx.fillStyle = W===WEATHER.night ? '#2b3350' : '#fff8ec';
+  for(const c of clouds){
+    const x = ((c.x + t/100000*c.v*80) % 1.25 - 0.12)*Wd + viewShiftX*0.9;
+    const y = c.y*horizonY, w = 70*c.s, h = 16*c.s;
+    cx.beginPath();
+    cx.ellipse(x, y, w, h, 0, 0, 7);
+    cx.ellipse(x-w*0.5, y+h*0.3, w*0.55, h*0.75, 0, 0, 7);
+    cx.ellipse(x+w*0.55, y+h*0.35, w*0.5, h*0.7, 0, 0, 7);
+    cx.fill();
+  }
+  cx.restore();
+}
+
+
+/* ======================= the hunt =======================
+   One animal per ride, chosen by the bot. You aim by looking (the crosshair is
+   fixed at the centre), hold the bow to draw and release to loose. The arrow
+   has a real flight time and drops, and the animal runs — so you have to lead
+   it and hold high. Three arrows, and it bolts once it knows you are there.
+*/
+/* `radius` is the hit box in world units. Generous boxes made a straight shot
+   with no lead land almost every time — these are sized so the arrow's flight
+   time genuinely has to be allowed for. `drift` is a steady sideways run on
+   top of the weave, so the target is never briefly motionless. */
+/* Weave and drift roughly halved and the hit boxes widened: leading the target
+   should be something you feel, not a calculation you have to get right to the
+   pixel. */
+const QUARRY = {
+  lion:  {fa:'شیر',   h: 420, speed: 0.74, weave: 0.55, drift: 340, fly:false, radius: 640},
+  tiger: {fa:'ببر',   h: 400, speed: 0.78, weave: 0.75, drift: 440, fly:false, radius: 610},
+  deer:  {fa:'آهو',   h: 430, speed: 0.84, weave: 1.10, drift: 560, fly:false, radius: 560},
+  zebra: {fa:'گورخر', h: 440, speed: 0.80, weave: 0.80, drift: 490, fly:false, radius: 590},
+  eagle: {fa:'عقاب',  h: 240, speed: 0.88, weave: 1.20, drift: 540, fly:true,  radius: 480},
+};
+
+const ARROWS = 4;
+const DRAW_TIME = 900;              /* ms to a full draw */
+const G = 1900;                     /* gravity on the arrow, world units/s² */
+const ARROW_MIN = 15000, ARROW_MAX = 22000;   /* loose draw ... full draw */
+
+let quarry = null, arrows = [], quiver = ARROWS, hunted = false, huntSent = false;
+let pulling = false, pullStart = 0, pullPower = 0;
+
+function spawnQuarry(){
+  const kind = QUARRY[DEST_QUARRY] ? DEST_QUARRY : 'deer';
+  const spec = QUARRY[kind];
+  quarry = {
+    kind, spec,
+    z: position + 7000 + Math.random()*3000,           /* ahead of you */
+    x: (Math.random()<0.5?-1:1) * (1800 + Math.random()*2200),
+    y: spec.fly ? 2600 + Math.random()*900 : 0,
+    vx: 0, dir: Math.random()<0.5 ? -1 : 1,
+    spooked: false, escaping: false, alive: true, t: Math.random()*10,
+  };
+}
+
+function quarryStep(dt, ts){
+  if(!quarry || !quarry.alive) return;
+  const q = quarry, s = q.spec;
+  q.t += dt;
+  /* It runs the way you do, always a shade slower — capped below your pace on
+     purpose. Left uncapped, a spooked animal outran the rider and no second
+     arrow could ever reach it. */
+  /* Once you are out of arrows it breaks away for real, pulls ahead and
+     shrinks into the distance — so the escape is something you watch happen. */
+  const pace = q.escaping
+    ? cruise * 1.22
+    : cruise * Math.min(0.97, s.speed * (q.spooked ? 1.08 : 1.0));
+  q.z += pace*dt;
+  /* weaving: the whole reason a straight shot does not work */
+  q.vx = Math.sin(q.t*s.weave*0.9)*700 + Math.sin(q.t*s.weave*0.37+1.1)*430
+       + (q.dir||1)*s.drift;
+  q.x += q.vx*dt*(q.spooked ? 1.2 : 1);
+  if(q.escaping) q.x += Math.sign(q.x||1)*700*dt;      /* breaks for the dunes */
+  if(s.fly) q.y = 2300 + Math.sin(q.t*0.75)*380 + (q.spooked ? 500 : 0);
+  const rel = q.z - position;
+  /* Turn it back before it runs outside the arc you can physically aim
+     through — otherwise it wanders off at 90° and the shot is impossible
+     rather than hard. */
+  if(Math.abs(q.x) > rel*0.80) q.dir = -Math.sign(q.x);
+  /* Once it is level with you the shot is gone — and at that range even a
+     small sideways offset needs an impossible angle. */
+  if(rel > 22000 || rel < 1300 || Math.abs(q.x) > 16000) q.alive = false;
+}
+
+function loose(power){
+  if(quiver <= 0 || !quarry || !quarry.alive || hunted) return;
+  quiver--;
+  const speed = ARROW_MIN + power*(ARROW_MAX-ARROW_MIN);
+  /* The crosshair is the ray dx = tan(yaw)*dz. But you are moving forward too,
+     so the arrow only gains ground at (speed - cruise): setting vx and vy
+     against the full speed made it fly far steeper than where you aimed.
+     Scaling them by the closing speed makes the crosshair mean what it says,
+     and leaves gravity as the only thing you have to allow for. */
+  const closing = Math.max(1200, speed - cruise);
+  /* Loft the arrow just enough to cancel the drop over the distance to the
+     animal, so the crosshair marks where the arrow actually arrives. Before
+     this you had to guess a hold-over with nothing on screen to guess from,
+     which is why shots that looked dead-on still landed short. Leading a
+     moving target is the skill; inventing the drop by feel was not. */
+  const range = quarry && quarry.alive
+    ? Math.max(1500, quarry.z - position) : 8000;
+  const flight = range/closing;
+  arrows.push({
+    dx: 0, dy: 0, dz: 60,
+    vx: Math.tan(yaw)*closing,
+    vy: Math.tan(pitch)*closing + 0.5*G*flight,
+    vz: speed, dead: false, age: 0,
+  });
+  if(quarry) quarry.spooked = true;
+  updateQuiver();
+}
+
+function arrowsStep(dt){
+  for(const a of arrows){
+    if(a.dead) continue;
+    a.age += dt;
+    const pz = a.dz;
+    a.dz += (a.vz - cruise)*dt;         /* you are moving too */
+    a.dx += a.vx*dt;
+    a.vy -= G*dt;
+    a.dy += a.vy*dt;
+
+    if(quarry && quarry.alive && !hunted){
+      const qz = quarry.z - position;
+      if(pz < qz && a.dz >= qz){        /* crossed the animal's depth */
+        const t = (qz - pz)/Math.max(1, a.dz - pz);
+        const ax = a.dx - a.vx*dt*(1-t);
+        const ay = a.dy - a.vy*dt*(1-t);
+        const r = quarry.spec.radius;
+        if(Math.abs(ax - quarry.x) < r &&
+           Math.abs(ay - (-CAM_H + quarry.y + quarry.spec.h*0.5)) < r*0.85){
+          hitQuarry();
+        }
+      }
+    }
+    if(a.dy < -CAM_H - 200 || a.dz > 40000 || a.age > 6) a.dead = true;
+  }
+  arrows = arrows.filter(a => !a.dead);
+}
+
+function hitQuarry(){
+  hunted = true;
+  quarry.alive = false;
+  showHunt('🏹 ' + quarry.spec.fa + ' را زدی!');
+  reportHunt(true);
+}
+
+function updateQuiver(){
+  document.getElementById('quiver').textContent =
+    '🏹'.repeat(Math.max(0,quiver)) + '·'.repeat(ARROWS-Math.max(0,quiver));
+}
+
+function showHunt(msg){
+  const el = document.getElementById('hunted');
+  el.textContent = msg; el.style.display = 'block';
+  setTimeout(()=>{ el.style.display = 'none'; }, 2600);
+}
+
+function reportHunt(hit){
+  if(huntSent) return;
+  huntSent = true;
+  const token = findToken();
+  if(!token) return;
+  try{
+    fetch('/hunt/' + encodeURIComponent(token), {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({hit: !!hit, shots: ARROWS - quiver}),
+    }).catch(()=>{});
+  }catch(e){}
+}
+
+/* ---- drawing the animals ---- */
+function animalSprite(kind, x, y, s, t, spooked){
+  cx.save(); cx.translate(x,y); cx.scale(s,s);
+  const gait = t*(spooked?13:8);
+  const leg = Math.sin(gait), leg2 = Math.sin(gait+2.1);
+
+  if(kind === 'eagle'){
+    const flap = Math.sin(t*9);
+    cx.fillStyle='#6b4a2c';
+    cx.beginPath(); cx.ellipse(0,0,26,13,0,0,7); cx.fill();
+    cx.fillStyle='#7d5735';
+    cx.beginPath();
+    cx.moveTo(-4,-2); cx.quadraticCurveTo(-52,-16-flap*26,-92,4-flap*16);
+    cx.quadraticCurveTo(-50,10,-4,8); cx.closePath(); cx.fill();
+    cx.beginPath();
+    cx.moveTo(4,-2); cx.quadraticCurveTo(52,-16-flap*26,92,4-flap*16);
+    cx.quadraticCurveTo(50,10,4,8); cx.closePath(); cx.fill();
+    cx.fillStyle='#efe3cd';
+    cx.beginPath(); cx.ellipse(24,-6,12,9,0,0,7); cx.fill();
+    cx.fillStyle='#d9a12c';
+    cx.beginPath(); cx.moveTo(34,-6); cx.lineTo(46,-2); cx.lineTo(34,2); cx.closePath(); cx.fill();
+    cx.restore(); return;
+  }
+
+  const coat = {lion:'#c99a52', tiger:'#d08a3a', deer:'#b07d4e', zebra:'#e7e2d8'}[kind];
+  const dark = {lion:'#8d6a34', tiger:'#8a4d18',
+                deer:'#7c5533', zebra:'#3a3630'}[kind];
+
+  groundShadow(0, 6, 40, 9, .30);
+  cx.strokeStyle=dark; cx.lineWidth=7; cx.lineCap='round';
+  cx.beginPath();
+  cx.moveTo(-18,-22); cx.lineTo(-20+leg*10, 4);
+  cx.moveTo(-10,-22); cx.lineTo(-8+leg2*10, 4);
+  cx.moveTo(14,-22);  cx.lineTo(16+leg2*10, 4);
+  cx.moveTo(22,-22);  cx.lineTo(24+leg*10, 4);
+  cx.stroke();
+
+  cx.fillStyle=coat;
+  cx.beginPath(); cx.ellipse(2,-32,32,18,0,0,7); cx.fill();
+  cx.beginPath(); cx.ellipse(28,-46,14,12,0.3,0,7); cx.fill();      /* neck */
+  cx.beginPath(); cx.ellipse(38,-56,13,10,0.1,0,7); cx.fill();      /* head */
+
+  if(kind==='tiger' || kind==='zebra'){
+    cx.strokeStyle=dark; cx.lineWidth=3;
+    for(let i=-3;i<=3;i++){
+      cx.beginPath(); cx.moveTo(i*8, -46); cx.quadraticCurveTo(i*8+2,-32,i*8-1,-18);
+      cx.stroke();
+    }
+  }
+  if(kind==='lion'){
+    cx.fillStyle=dark;
+    cx.beginPath(); cx.ellipse(34,-52,19,18,0,0,7); cx.fill();       /* mane */
+    cx.fillStyle=coat;
+    cx.beginPath(); cx.ellipse(42,-55,11,9,0,0,7); cx.fill();
+  }
+  if(kind==='deer'){
+    cx.strokeStyle=dark; cx.lineWidth=3;
+    cx.beginPath();
+    cx.moveTo(38,-64); cx.lineTo(34,-80); cx.moveTo(34,-80); cx.lineTo(28,-86);
+    cx.moveTo(34,-80); cx.lineTo(40,-88);
+    cx.moveTo(44,-64); cx.lineTo(48,-80); cx.moveTo(48,-80); cx.lineTo(44,-88);
+    cx.moveTo(48,-80); cx.lineTo(55,-86);
+    cx.stroke();
+  }
+  cx.strokeStyle=dark; cx.lineWidth=4;
+  cx.beginPath(); cx.moveTo(-28,-38); cx.quadraticCurveTo(-42,-40,-44,-26); cx.stroke();
+  cx.restore();
+}
+
+function drawCrosshair(){
+  const cxp = Wd/2, cyp = Ht/2;
+  cx.save();
+  cx.strokeStyle = 'rgba(255,246,220,.85)'; cx.lineWidth = 2;
+  cx.beginPath(); cx.arc(cxp, cyp, 15, 0, 7); cx.stroke();
+  cx.beginPath();
+  cx.moveTo(cxp-26,cyp); cx.lineTo(cxp-8,cyp);
+  cx.moveTo(cxp+8,cyp);  cx.lineTo(cxp+26,cyp);
+  cx.moveTo(cxp,cyp-26); cx.lineTo(cxp,cyp-8);
+  cx.moveTo(cxp,cyp+8);  cx.lineTo(cxp,cyp+26);
+  cx.stroke();
+  /* a fuller draw simply gets there sooner — shown on the draw bar, not here */
+  cx.restore();
+}
+
+function drawQuarryAndArrows(ts){
+  if(quarry && quarry.alive){
+    const rel = quarry.z - position;
+    if(rel > 120 && rel < 24000){
+      const scale = camDepth/rel;
+      const sx = Wd/2 + scale*quarry.x*Wd/2 + viewShiftX;
+      const sy = Ht/2 - scale*(-CAM_H + quarry.y)*Ht/2 + viewShiftY;
+      /* Size it against its own hit box, so what you see is what you can hit.
+         The old flat multiplier drew a deer about one pixel wide at range. */
+      /* Sized against its own hit box, then capped: a lion you have caught up
+         with was filling half the screen. */
+      const k = Math.min(1.55, scale*Wd*0.55 * (quarry.spec.radius/27));
+      if(k > 0.02 && sy > -300 && sy < Ht+400){
+        cx.save();
+        cx.globalAlpha = Math.max(0.25, 1 - rel/26000);
+        animalSprite(quarry.kind, sx, sy, k, quarry.t, quarry.spooked);
+        cx.restore();
+      }
+    }
+  }
+  for(const a of arrows){
+    if(a.dz < 40) continue;
+    const scale = camDepth/a.dz;
+    const sx = Wd/2 + scale*a.dx*Wd/2 + viewShiftX;
+    const sy = Ht/2 - scale*a.dy*Ht/2 + viewShiftY;
+    const k = Math.max(1, scale*Wd*0.5);
+    cx.save();
+    cx.strokeStyle='#e8dcc0'; cx.lineWidth=Math.max(1, k*3);
+    cx.beginPath(); cx.moveTo(sx, sy); cx.lineTo(sx - a.vx*0.0016*k, sy + 9*k);
+    cx.stroke();
+    cx.restore();
+  }
+}
+
+/* ======================= the frame ======================= */
+let t0=null, progress=0, position=0, playerX=0, lastTs=0, frameId=0;
+
+/* ---- looking around ----------------------------------------------------
+   One set of pointer events covers mouse, touch and pen. Drag to look; a tap
+   desktop the mouse also looks around without holding a button, which feels
+   closer to a real free-look. */
+let yaw = 0, pitch = 0, yawTarget = 0, pitchTarget = 0;
+let dragging = false, dragX = 0, dragY = 0, dragMoved = 0, freeLook = false;
+let YAW_MAX = 0.75;               /* opened right up once there is a target */
+let PITCH_MAX = 0.22;
+const isCoarse = matchMedia && matchMedia('(pointer: coarse)').matches;
+
+/* Drag right, look right. It used to be the other way round — the signs were
+   written for dragging the world rather than turning the camera — and roughly
+   three times slower than it needed to be. */
+const LOOK_X = 0.0090, LOOK_Y = 0.0060;
+
+function look(dx, dy){
+  yawTarget   = Math.max(-YAW_MAX,   Math.min(YAW_MAX,   yawTarget   + dx*LOOK_X));
+  pitchTarget = Math.max(-PITCH_MAX, Math.min(PITCH_MAX, pitchTarget - dy*LOOK_Y));
+}
+
+cv.addEventListener('pointerdown', e => {
+  /* With a mouse you already look by moving the cursor, so a click anywhere is
+     free to mean "draw the bow" — no need to hit the button. Touch keeps
+     drag-to-look, and shoots from the button. */
+  if(!isCoarse && e.pointerType === 'mouse'){ startPull(e); return; }
+  dragging = true; dragMoved = 0; dragX = e.clientX; dragY = e.clientY;
+  cv.setPointerCapture && cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointermove', e => {
+  if(dragging){
+    const dx = e.clientX-dragX, dy = e.clientY-dragY;
+    dragX = e.clientX; dragY = e.clientY;
+    dragMoved += Math.abs(dx)+Math.abs(dy);
+    look(dx, dy);
+  } else if(!isCoarse && e.pointerType === 'mouse'){
+    /* free-look: aim where the cursor sits, relative to the middle */
+    yawTarget   = ((e.clientX/Wd)-0.5) *  2 * YAW_MAX;
+    pitchTarget = ((e.clientY/Ht)-0.5) * -2 * PITCH_MAX;
+    freeLook = true;
+  }
+});
+function endDrag(e){
+  if(pulling && (!e || e.pointerType === 'mouse')){ endPull(e); return; }
+  dragging = false;
+}
+cv.addEventListener('pointerup', endDrag);
+
+const bowBtn = document.getElementById('bowBtn');
+function startPull(e){
+  if(e){ e.preventDefault(); e.stopPropagation(); }
+  if(quiver <= 0 || hunted) return;
+  pulling = true; pullStart = performance.now();
+  bowBtn.classList.add('pull');
+}
+function endPull(e){
+  if(e){ e.preventDefault(); e.stopPropagation(); }
+  if(!pulling) return;
+  pulling = false;
+  bowBtn.classList.remove('pull');
+  loose(pullPower);
+  pullPower = 0;
+  document.getElementById('drawFill').style.width = '0%';
+}
+bowBtn.addEventListener('pointerdown', startPull);
+bowBtn.addEventListener('pointerup', endPull);
+bowBtn.addEventListener('pointercancel', endPull);
+bowBtn.addEventListener('pointerleave', e => { if(pulling) endPull(e); });
+addEventListener('keydown', e => { if(e.code==='Space' && !pulling) startPull(); });
+addEventListener('keyup',   e => { if(e.code==='Space') endPull(); });
+cv.addEventListener('pointercancel', endDrag);
+cv.addEventListener('pointerleave', () => { if(!isCoarse) freeLook = false; });
+
+let riders = [], cruise = 0;
 function seedRiders(){
   const robes = ['#6a3d6a','#3c5f8a','#7a5a2c'];
-  RIDER_LANES = OTHERS.map((_,i)=>({
-    lane:  i,
-    start: 0.62 - i*0.13,
-    rel:   [-2.4, 1.7, -1.1, 2.6][i % 4],   /* -ve drifts back, +ve overtakes */
-    scale: 0.50 + i*0.06,
-    robe:  robes[i % robes.length],
+  cruise = trackLength / (TRIP_MS/1000);
+  riders = OTHERS.map((nm,i)=>({
+    name: nm,
+    z: 900 + i*1200,
+    rel: [-430, 340, -260, 480][i%4],
+    offset: (i%2 ? 1 : -1) * (0.30 + i*0.12),
+    robe: robes[i%robes.length],
   }));
 }
 
-let t0 = null, progress = 0, boost = 0;
-addEventListener('pointerdown', ()=>{ boost += 0.10; });
+/* One filled path per ridge. The crest is drawn as a smooth curve through the
+   midpoints of the sample points — straight lineTo between samples is what
+   made the skyline look faceted. */
+function ridgePoints(drawn, band, side){
+  const b = BANDS[band], sgn = side===0 ? -1 : 1, pts = [];
+  for(let i=drawn.length-1;i>=0;i--){
+    const seg = drawn[i], p = seg.p1;
+    if(!isFinite(p.screen.x)) continue;
+    pts.push([
+      p.screen.x + p.screen.scale * sgn*b.x * Wd/2,
+      p.screen.y - p.screen.scale * seg.dune[side][band] * Ht/2,
+    ]);
+  }
+  return pts;
+}
+
+function traceRidge(pts){
+  cx.moveTo(pts[0][0], pts[0][1]);
+  for(let i=1;i<pts.length-1;i++){
+    const mx = (pts[i][0]+pts[i+1][0])/2, my = (pts[i][1]+pts[i+1][1])/2;
+    cx.quadraticCurveTo(pts[i][0], pts[i][1], mx, my);
+  }
+  const last = pts[pts.length-1];
+  cx.lineTo(last[0], last[1]);
+}
+
+function drawRidge(drawn, band, side, fill, crest){
+  const sgn = side===0 ? -1 : 1;
+  const pts = ridgePoints(drawn, band, side);
+  if(pts.length < 3) return;
+
+  /* Close the shape along the ridge's own height, not up to the top corner.
+     Closing at (edge, -60) drew a diagonal from the far crest to the corner —
+     a huge wedge of sand across the sky, which only became obvious once the
+     camera could turn and the ridge line moved away from the screen edge. */
+  const outer = sgn < 0 ? -60 : Wd + 60;
+  cx.beginPath();
+  traceRidge(pts);
+  cx.lineTo(pts[pts.length-1][0], Ht+30);
+  cx.lineTo(outer, Ht+30);
+  cx.lineTo(outer, pts[0][1]);
+  cx.closePath();
+  cx.fillStyle = fill;
+  cx.fill();
+
+  /* sunlit rim along the crest, a couple of pixels of scattered light */
+  if(crest){
+    cx.beginPath();
+    traceRidge(pts);
+    cx.strokeStyle = crest;
+    cx.lineWidth = 1.6;
+    cx.stroke();
+  }
+}
 
 function frame(ts){
-  if(t0===null) t0=ts;
-  progress = Math.min(1, (ts-t0)/TRIP_MS + boost);
-  const scroll = progress * 3400;
+  if(t0===null){ t0=ts; lastTs=ts; }
+  const dt = Math.min(0.05, (ts-lastTs)/1000); lastTs = ts;
 
-  /* sky */
-  const g = cx.createLinearGradient(0,0,0,HORIZON+40);
-  g.addColorStop(0,DP.sky[0]); g.addColorStop(.62,DP.sky[1]); g.addColorStop(1,DP.sky[2]);
-  cx.fillStyle=g; cx.fillRect(0,0,Wd,HORIZON+40);
+  progress = Math.min(1, (ts-t0)/TRIP_MS);
+  position = progress * (trackLength - SEG_LEN*22);
 
-  cx.fillStyle=DP.sun; cx.globalAlpha=.9;
-  cx.beginPath(); cx.arc(Wd*0.74, HORIZON*0.34, Math.min(Wd,Ht)*0.075, 0, 7); cx.fill();
-  cx.globalAlpha=1;
-  if(DP.name==='night'){ cx.fillStyle='#fff';
-    for(let i=0;i<40;i++){ const sx=(hash('s'+i)%1000)/1000*Wd, sy=(hash('y'+i)%1000)/1000*HORIZON*0.8;
-      cx.globalAlpha=.3+((i*37)%50)/100; cx.fillRect(sx,sy,2,2);} cx.globalAlpha=1; }
+  const at = currentWeather(progress);
+  const fog = fogNow(), fogCol = fogColNow();
+  frameId++;
 
-  /* Distant dunes stay ABOVE the horizon line. They used to sit below it and
-     swallow the landmark whole. */
-  duneRidge(scroll*0.10, Ht*0.030, HORIZON-Ht*0.055, DP.sand[2], 1.5);
-  duneRidge(scroll*0.22, Ht*0.034, HORIZON-Ht*0.020, DP.sand[0], 0);
+  /* ease toward where you are looking; let go and it drifts back to the road */
+  /* Only drift back to the road when there is nothing to shoot at. Recentring
+     during a hunt made the shot impossible: you would aim, let go to reach the
+     bow, and the view would slide off the animal before you could loose. */
+  const aiming = !!(quarry && quarry.alive && !hunted && quiver > 0);
+  if(!aiming && !dragging && !freeLook){ yawTarget *= 0.94; pitchTarget *= 0.94; }
+  yaw   += (yawTarget   - yaw)   * Math.min(1, dt*9);
+  pitch += (pitchTarget - pitch) * Math.min(1, dt*9);
+  viewShiftX = -Math.tan(yaw)   * camDepth * Wd/2;
+  viewShiftY =  Math.tan(pitch) * camDepth * Ht/2;
 
-  /* ground, laid down before the landmark so it can stand on it */
-  cx.fillStyle=DP.sand[1]; cx.fillRect(0,HORIZON,Wd,Ht);
+  const base = findSegment(position);
+  const basePercent = (position % SEG_LEN)/SEG_LEN;
+  const camY = CAM_H + (base.p1.world.y + (base.p2.world.y-base.p1.world.y)*basePercent);
+  playerX += (-base.curve*0.00055 - playerX)*Math.min(1, dt*2.4);
 
-  /* haze band along the horizon, behind the destination */
-  cx.save(); cx.globalAlpha=.5; cx.fillStyle=DP.haze; cx.filter='blur(9px)';
-  cx.fillRect(0,HORIZON-10,Wd,24); cx.restore();
-
-  /* the destination, standing on open ground and growing as you close in */
-  const app = Math.max(0, (progress-0.12)/0.88);
-  if(app>0){
-    const s = 0.30 + app*app*1.45;
-    cx.globalAlpha = Math.min(1, 0.30+app*1.5);
-    landmark(KIND, Wd*0.52 + (1-app)*Wd*0.14, HORIZON + Ht*0.055 + app*Ht*0.16, s);
-    cx.globalAlpha = 1;
-  }
-
-  /* a low near ridge, in front of the landmark's feet for depth only */
-  duneRidge(scroll*0.55, Ht*0.014, HORIZON+Ht*0.20, DP.sand[0], 0);
-
-  const drawLayer = (props, speed, y, scale, col, dk)=>{
-    for(const p of props){
-      const x = Wd - ((p.x + scroll*speed) % 1600) ;
-      if(x>-80 && x<Wd+80) prop(p.k, x, y, p.s*scale, col, dk);
+  /* --- pass 1: project everything, front to back --- */
+  let x=0, dx=-(base.curve*basePercent), maxy=Ht+200;
+  const drawn=[];
+  for(let n=0;n<DRAW_DIST;n++){
+    const i = base.index+n;
+    if(i >= segments.length) break;
+    const seg = segments[i];
+    project(seg.p1, playerX*ROAD_W - x,      camY, position, Wd, Ht);
+    project(seg.p2, playerX*ROAD_W - x - dx, camY, position, Wd, Ht);
+    x += dx; dx += seg.curve;
+    seg.frame = frameId;
+    seg.p2draw = seg.p2;          /* per-frame only; never touch seg.p2 itself */
+    seg.fogAmt = 1 - Math.exp(-Math.pow(n/DRAW_DIST, 1.45) * (fog + 0.7));
+    if(seg.p1.camera.z <= camDepth || seg.p2.screen.y >= maxy) continue;
+    const tall = maxy - seg.p2.screen.y;
+    maxy = seg.p2.screen.y;
+    if(tall < 0.7 && drawn.length > 8){
+      /* Less than a pixel high: let the previous segment span it instead.
+         This writes p2draw, a per-frame field — assigning to seg.p2 here
+         permanently rewrote the track and the geometry exploded. */
+      drawn[drawn.length-1].p2draw = seg.p2;
+      continue;
     }
-  };
-  drawLayer(farProps, 0.30, HORIZON+Ht*0.085, 0.45, DP.sand[0], DP.sand[1]);
-  drawLayer(midProps, 0.65, HORIZON+Ht*0.175, 0.80,'#3f7f4a', '#6b4f30');
+    drawn.push(seg);
+  }
+  const horizonY = drawn.length
+    ? (drawn[drawn.length-1].p2draw || drawn[drawn.length-1].p2).screen.y : Ht*0.45;
 
-  /* Other travellers ride at their own pace: some slip behind and fall off the
-     left edge, some pull ahead and vanish to the right. Nobody is pinned to
-     your speed, which is what made them look like scenery before. */
-  const secs = (ts - (t0||ts)) / 1000;
-  OTHERS.forEach((nm,i)=>{
-    const lane = RIDER_LANES[i];
-    const gy = HORIZON + Ht*(0.15 + lane.lane*0.05);
-    const ox = Wd*lane.start + lane.rel*secs*Wd*0.01 + Math.sin(ts/900+i)*3;
-    if (ox < -120 || ox > Wd+120) return;          // gone for good
-    const sc = lane.scale;
-    const edge = Math.min(1, Math.min(ox+120, Wd+120-ox)/110);
-    cx.globalAlpha = edge;
-    camel(ox, gy, sc, '#b08a5c', '#7d5f3e', ts/(150-lane.rel*3)+i,
-          lane.robe);
-    cx.fillStyle='rgba(255,244,220,.92)'; cx.font=`${12+i}px system-ui`;
-    cx.textAlign='center'; cx.fillText(nm, ox, gy-70*sc);
-    cx.globalAlpha = 1;
-  });
+  drawSky(ts, Math.max(30, horizonY));
 
-  drawLayer(nearProps, 1.15, HORIZON+Ht*0.34, 1.2, DP.sand[1], '#5c452c');
-
-  /* you */
-  const gy = HORIZON + Ht*0.38;
-  const bob = Math.sin(ts/140)*3;
-  cx.save(); cx.globalAlpha=.25; cx.fillStyle='#000';
-  cx.beginPath(); cx.ellipse(Wd*0.30, gy+4, 52, 10, 0, 0, 7); cx.fill(); cx.restore();
-  camel(Wd*0.30, gy+bob, 1.15, '#c39a68', '#8a6a46', ts/130, '#2c6b46');
-
-  /* dust kicked up behind */
-  cx.fillStyle='rgba(226,205,166,.5)';
-  for(let i=0;i<7;i++){
-    const px = Wd*0.30 - 30 - ((ts/6+i*40)%150);
-    const r = 3+((i*7)%6);
-    cx.beginPath(); cx.arc(px, gy-4-Math.sin(ts/200+i)*6, r, 0, 7); cx.fill();
+  /* --- ground plane, fogged at the horizon --- */
+  /* --- ground, one full-width quad per segment ---
+     This has to follow the same geometry as the road. Filling the ground as a
+     single rectangle from one horizon line was wrong the moment the road
+     climbed a rise: the track floated above the fill and carried on into the
+     sky. Ground and road now share their vertices, so the road can never
+     detach from the land or cross the horizon. */
+  for(let i=drawn.length-1;i>=0;i--){
+    const seg = drawn[i];
+    const p2 = seg.p2draw || seg.p2;
+    const shade = mixCol(
+      mixCol(SAND.midShade, SAND.midLit, 0.30 + (seg.wob.tone-0.5)*0.18),
+      fogCol, Math.min(0.9, seg.fogAmt));
+    quad(seg.p1.screen.x, seg.p1.screen.y, Wd*1.6,
+         p2.screen.x, p2.screen.y, Wd*1.6, shade);
   }
 
-  if(DP.shade){ cx.fillStyle=`rgba(20,14,8,${DP.shade*0.35})`; cx.fillRect(0,0,Wd,Ht); }
+  /* --- dunes: far ridges first, so nearer ones stand in front ---
+     Colour comes from depth (atmospheric perspective) and from which way the
+     slope faces the sun, not from a flat per-band swatch. */
+  const sunSide = 1;                                  /* sun sits screen-right */
+  for(let b=0;b<BANDS.length;b++){
+    const depth = 1 - b/(BANDS.length-1);             /* 1 = farthest */
+    for(let side=0;side<2;side++){
+      const facingSun = (side===1) === (sunSide===1);
+      const lit  = facingSun ? SAND.lit : SAND.shade;
+      const base = facingSun ? SAND.midLit : SAND.midShade;
 
+      /* Tones stay close together — the swells should be felt, not outlined.
+         Distance is carried by haze rather than by a darker swatch. */
+      const haze  = Math.min(1, fog/2.6);
+      const hazed = mixCol(lit,  fogCol, 0.10 + depth*0.42*haze);
+      const deep  = mixCol(base, fogCol, 0.04 + depth*0.30*haze);
+
+      const g = cx.createLinearGradient(0, horizonY-30, 0, Ht);
+      g.addColorStop(0,   hazed);
+      g.addColorStop(0.22, deep);
+      g.addColorStop(1,   mixCol(deep, SAND.deep, 0.30));
+      drawRidge(drawn, b, side, g,
+                b === 0 ? mixCol(hazed, '#fff2d2', facingSun ? 0.30 : 0.12) : null);
+    }
+  }
+  drawGrain(Math.max(0, horizonY-10), 0.15);
+
+  /* --- the track, far to near ---
+     An early-Islamic caravan road is a worn strip of dirt, not paving: no kerb,
+     no rumble strip, no repeating light/dark courses. What makes it read as a
+     road is that the sand is packed and slightly darker, the edges wander, and
+     hooves have cut two shallow ruts down it. */
+  for(let i=drawn.length-1;i>=0;i--){
+    const seg = drawn[i];
+    const p2 = seg.p2draw || seg.p2;
+    const w1 = seg.p1.screen.w * seg.wob.w, w2 = p2.screen.w * (seg.wob.w);
+    const x1 = seg.p1.screen.x + seg.p1.screen.w * seg.wob.dx;
+    const x2 = p2.screen.x + p2.screen.w * seg.wob.dx;
+
+    /* a soft shoulder where packed dirt gives way to loose sand — only worth
+       drawing while the track is more than a few pixels wide */
+    if(w1 > 5){
+      cx.globalAlpha = 0.45;
+      quad(x1, seg.p1.screen.y, w1*1.30, x2, p2.screen.y, w2*1.30,
+           mixCol(SAND.midShade, SAND.road, 0.55));
+      cx.globalAlpha = 0.75;
+      quad(x1, seg.p1.screen.y, w1*1.12, x2, p2.screen.y, w2*1.12,
+           mixCol(SAND.midShade, SAND.road, 0.75));
+    }
+
+    /* the packed surface — barely darker than the ground it lies on */
+    cx.globalAlpha = 0.92;
+    quad(x1, seg.p1.screen.y, w1, x2, p2.screen.y, w2,
+         mixCol(SAND.road, SAND.midShade, 0.18 + seg.wob.tone*0.16));
+    cx.globalAlpha = 1;
+
+    if(w1 > 16){
+      const rut = mixCol(SAND.road, '#6d5330', 0.20);
+      cx.globalAlpha = 0.5;
+      for(const off of [-0.34, 0.30]){
+        quad(x1 + w1*off, seg.p1.screen.y, w1*0.085,
+             x2 + w2*off, p2.screen.y, w2*0.085, rut);
+      }
+      cx.globalAlpha = 1;
+    }
+
+    /* sand blown across the track, straddling the edge so it never reads
+       as a drawn line */
+    if(w1 > 40 && seg.wob.tone > 0.72){
+      cx.globalAlpha = 0.5;
+      quad(x1 + w1*0.55, seg.p1.screen.y, w1*0.5,
+           x2 + w2*0.55, p2.screen.y, w2*0.5, SAND.midLit);
+      cx.globalAlpha = 1;
+    }
+    if(w1 > 40 && seg.wob.tone < 0.28){
+      cx.globalAlpha = 0.5;
+      quad(x1 - w1*0.55, seg.p1.screen.y, w1*0.5,
+           x2 - w2*0.55, p2.screen.y, w2*0.5, SAND.midLit);
+      cx.globalAlpha = 1;
+    }
+
+    if(seg.fogAmt > 0.06){
+      cx.globalAlpha = seg.fogAmt;
+      quad(x1, seg.p1.screen.y, w1*1.4, x2, p2.screen.y, w2*1.4, fogCol);
+      cx.globalAlpha = 1;
+    }
+  }
+
+  /* --- sprites, far to near --- */
+  for(let i=drawn.length-1;i>=0;i--){
+    const seg = drawn[i];
+    for(const sp of seg.sprites){
+      const scale = seg.p1.screen.scale;
+      const sx = seg.p1.screen.x + scale*sp.offset*ROAD_W*Wd/2;
+      const sy = seg.p1.screen.y;
+      const k  = scale*Wd*0.55;
+      if(k < 0.02 || sy > Ht+400) continue;
+      cx.save();
+      cx.globalAlpha = Math.max(0, 1-seg.fogAmt);
+      if(sp.type==='prop') prop(sp.kind, sx, sy, k*sp.scale*0.95, sp.flip);
+      else {
+        groundShadow(sx, sy+2, k*80, k*18, .3);
+        landmark(KIND, sx, sy, k*2.6);
+      }
+      cx.restore();
+    }
+  }
+
+  /* --- other travellers --- */
+  for(const r of riders){
+    r.z += (cruise + r.rel)*dt;
+    let rel = r.z - position;
+    if(rel < -700){ r.z = position + 5200 + Math.random()*2200; rel = r.z - position; }
+    if(rel > 8000){ r.z = position - 600; rel = r.z - position; }
+    if(rel < 60) continue;
+    const seg = segments[Math.floor(r.z/SEG_LEN)];
+    if(!seg || seg.frame !== frameId) continue;
+    const scale = camDepth/Math.max(1, rel);
+    const sx = seg.p1.screen.x + scale*r.offset*ROAD_W*Wd/2;
+    const sy = seg.p1.screen.y;
+    const k  = scale*Wd*0.55;
+    if(sy < 0 || sy > Ht+300 || k < 0.02) continue;
+    cx.save();
+    cx.globalAlpha = Math.max(0, 1-(seg.fogAmt||0));
+    camelRear(sx, sy, k*1.2, r.robe);
+    if(k > 0.07){
+      cx.fillStyle='rgba(255,244,220,.92)';
+      cx.font=`${Math.min(20, 10+k*16)}px system-ui`; cx.textAlign='center';
+      cx.fillText(r.name, sx, sy - 135*k);
+    }
+    cx.restore();
+  }
+
+  /* The horizon haze goes on LAST of the distant layers. Drawn before the
+     road, it sat underneath it — which is what made the track look like it
+     floated above the ground and carried on through the horizon. */
+  const hz = cx.createLinearGradient(0, horizonY-34, 0, horizonY+30);
+  hz.addColorStop(0,   mixCol(fogCol,'#ffffff',0.16));
+  hz.addColorStop(.45, mixCol(fogCol,'#ffffff',0.05));
+  hz.addColorStop(1,   'rgba(255,255,255,0)');
+  cx.fillStyle = hz; cx.fillRect(0, horizonY-34, Wd, 64);
+
+  /* --- the hunt --- */
+  if(!quarry && progress > 0.18 && progress < 0.30) spawnQuarry();
+  const hunting = !!(quarry && quarry.alive && !hunted);
+  YAW_MAX   = hunting ? 1.35 : 0.75;      /* ±77° while hunting, ±43° otherwise */
+  PITCH_MAX = hunting ? 0.55 : 0.22;
+  if(quarry){
+    quarryStep(dt, ts);
+    arrowsStep(dt);
+    drawQuarryAndArrows(ts);
+    const active = quarry.alive && !hunted && quiver > 0;
+    document.getElementById('hunt').style.display = active ? 'flex' : 'none';
+    if(active) drawCrosshair();
+    if(pulling){
+      pullPower = Math.min(1, (performance.now()-pullStart)/DRAW_TIME);
+      document.getElementById('drawFill').style.width = (pullPower*100)+'%';
+    }
+    /* Out of arrows means it starts running, not that it has already gone.
+       Announcing the escape while the animal was still plainly on screen was
+       just wrong — the message now waits until it has actually left. */
+    if(!hunted && quiver === 0 && arrows.length === 0) quarry.escaping = true;
+    if(!hunted && !quarry.alive && !huntSent){
+      showHunt(quarry.spec.fa + ' فرار کرد');
+      reportHunt(false);
+    }
+  }
+
+  povCamel(ts, playerX*6);
+
+  if(W.rain) drawRain(ts);
+  drawGrit(ts, lerp(Wbase.grit, W.grit, Wblend || (W===Wbase?0:1)));
+  if(W.tint){ cx.fillStyle=W.tint; cx.fillRect(0,0,Wd,Ht); }
+
+  const label = document.getElementById('weather');
+  const wname = WEATHER[at.name].fa;
+  if(label.dataset.now !== wname){
+    label.dataset.now = wname; label.textContent = wname;
+    label.style.opacity = 1; setTimeout(()=>{ label.style.opacity = 0; }, 3000);
+  }
   document.getElementById('fill').style.width = (progress*100)+'%';
 
   if(progress>=1){
     document.getElementById('doneText').textContent = 'رسیدی به ' + TITLE;
-    document.getElementById('doneSub').textContent = FROM ? 'از ' + FROM : '';
+    if(quarry && !huntSent) reportHunt(false);
+    const q = quarry ? (hunted ? '🏹 ' + quarry.spec.fa + ' را شکار کردی'
+                               : '🏹 ' + quarry.spec.fa + ' فرار کرد') : '';
+    document.getElementById('doneSub').textContent =
+      [FROM ? 'از ' + FROM : '', q].filter(Boolean).join(' · ');
     document.getElementById('done').style.display='flex';
     document.getElementById('skip').style.display='none';
     return;
   }
   requestAnimationFrame(frame);
 }
+
 loadTrip().then(()=>{
   document.getElementById('rider').textContent = '🐫 ' + RIDER;
   document.getElementById('dest').textContent  = (FROM ? FROM + ' ← ' : '') + TITLE;
-  seedWorld();
-  seedRiders();
-  resize();
+  seed = hash(DEST); rnd = mulberry(seed);
+  pickWeather(); currentWeather(0);
+  buildTrack(); seedRiders(); resize(); buildGrain(); updateQuiver();
   const sp = document.getElementById('signpost');
   sp.textContent = 'به سوی ' + TITLE;
   sp.style.opacity = 1;
