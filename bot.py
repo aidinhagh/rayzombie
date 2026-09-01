@@ -422,6 +422,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "#رایگیری — نتیجه ۲۴ ساعت گذشته\n"
         "/duel — مبارزه: حمله / دفاع / حیله\n"
         "/travel — سفر روی نقشه\n"
+        "/hunts — جدول شکار\n"
         "/delete — فقط مالک گروه: حذف رأی\n\n"
         "اسم فارسی یا انگلیسی، کوتاه‌شده یا یوزرنیم — پیدا می‌کنم. 🗳️"
     )
@@ -836,6 +837,21 @@ ADMIN_HANDLE = os.environ.get("ADMIN_HANDLE", "Aidinhagh").lstrip("@")
 MINIAPP = os.environ.get("MINIAPP_SHORT_NAME", "").strip()
 _bot_username: str | None = None
 EXACT_STEPS = True          # a 4 means four roads, not "up to four"
+
+# One animal is out there on every ride. The bot picks it, not the page, so the
+# result can be trusted enough to announce and to keep score.
+QUARRY = [("deer", 34), ("zebra", 26), ("lion", 20), ("tiger", 15), ("eagle", 5)]
+QUARRY_FA = {"lion": "شیر", "tiger": "ببر", "deer": "آهو",
+             "zebra": "گورخر", "eagle": "عقاب"}
+
+
+def pick_quarry() -> str:
+    roll = secrets.randbelow(sum(w for _, w in QUARRY))
+    for animal, weight in QUARRY:
+        roll -= weight
+        if roll < 0:
+            return animal
+    return "deer"
 PAGE = 8                    # destinations per keyboard page
 DICE_PAUSE = 4.2            # let the dice animation land before answering
 
@@ -1064,6 +1080,9 @@ async def on_travel_button(update: Update,
         "title": worldmap.name_of(arg), "name": name,
         "from": worldmap.name_of(origin) if origin else "",
         "others": others,
+        "quarry": pick_quarry(),
+        # server-side only; stripped before the page ever sees it
+        "chat_id": chat_id, "user_id": user_id,
     }))
     markup = await ride_button(context.bot, ride_token, web.public_url())
     if markup is None:
@@ -1198,6 +1217,23 @@ async def webcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text("\n".join(lines))
 
 
+async def hunts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/hunts — who has actually hit anything this week."""
+    message = update.effective_message
+    chat_id, _ = await board_for(update, context)
+    if chat_id is None:
+        return
+    rows = await asyncio.to_thread(roster.hunt_tally, chat_id)
+    if not rows:
+        await message.reply_text("این هفته کسی شکاری نکرده. 🏹")
+        return
+    lines = ["🏹 <b>شکار هفته</b>", ""]
+    for i, (name, kills, tries) in enumerate(rows[:10]):
+        rank = MEDALS[i] if i < 3 else f"{fa_num(i+1)}."
+        lines.append(f"{rank} {name} — {fa_num(kills or 0)} از {fa_num(tries)}")
+    await message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
 async def show_map(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/map — what the bot believes the roads are, so it can be corrected."""
     text = worldmap.summary()
@@ -1219,6 +1255,7 @@ def main() -> None:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
     async def _boot(_app) -> None:
+        web.bot = _app.bot          # so a hunt result can be announced in chat
         await web.start()
 
     app = Application.builder().token(TOKEN).post_init(_boot).build()
@@ -1240,6 +1277,7 @@ def main() -> None:
     app.add_handler(CommandHandler("clearlocs", clear_locations), group=1)
     app.add_handler(CommandHandler("map", show_map), group=1)
     app.add_handler(CommandHandler("webcheck", webcheck), group=1)
+    app.add_handler(CommandHandler("hunts", hunts), group=1)
     app.add_handler(CallbackQueryHandler(on_travel_button, pattern=r"^t\|"),
                     group=1)
     app.add_handler(
