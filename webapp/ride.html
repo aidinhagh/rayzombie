@@ -843,14 +843,14 @@ const SPRITE_UNITS = 90;            /* feet-to-head, in the sprite's own units *
 const CAMEL_UNITS = 112;            /* the same, for camelRear() */
 const RIDER_SIZE = 2400;            /* camel plus rider, in world units */
 const QUARRY = {
-  lion:  {fa:'شیر',   size: 1600, speed: 0.950, weave: 0.55, drift: 340, fly:false},
-  tiger: {fa:'ببر',   size: 1550, speed: 0.955, weave: 0.75, drift: 440, fly:false},
-  deer:  {fa:'آهو',   size: 1400, speed: 0.965, weave: 1.10, drift: 560, fly:false},
-  zebra: {fa:'گورخر', size: 1500, speed: 0.958, weave: 0.80, drift: 490, fly:false},
-  eagle: {fa:'عقاب',  size: 1050, speed: 0.968, weave: 1.20, drift: 540, fly:true},
+  lion:  {fa:'شیر',   size: 1600, speed: 0.950, weave: 0.95, drift: 1750, fly:false},
+  tiger: {fa:'ببر',   size: 1550, speed: 0.955, weave: 1.25, drift: 1950, fly:false},
+  deer:  {fa:'آهو',   size: 1400, speed: 0.965, weave: 1.85, drift: 2250, fly:false},
+  zebra: {fa:'گورخر', size: 1500, speed: 0.958, weave: 1.35, drift: 2050, fly:false},
+  eagle: {fa:'عقاب',  size: 1050, speed: 0.968, weave: 2.10, drift: 2150, fly:true},
 };
 
-const ARROWS = 4;
+const ARROWS = 3;
 const DRAW_TIME = 900;              /* ms to a full draw */
 const G = 1900;                     /* gravity on the arrow, world units/s² */
 const ARROW_MIN = 15000, ARROW_MAX = 22000;   /* loose draw ... full draw */
@@ -885,11 +885,11 @@ function quarryStep(dt, ts){
     : cruise * Math.min(0.995, s.speed * (q.spooked ? 1.02 : 1.0));
   q.z += pace*dt;
   /* weaving: the whole reason a straight shot does not work */
-  q.vx = Math.sin(q.t*s.weave*0.9)*700 + Math.sin(q.t*s.weave*0.37+1.1)*430
+  q.vx = Math.sin(q.t*s.weave*0.9)*1150 + Math.sin(q.t*s.weave*0.37+1.1)*720
        + (q.dir||1)*s.drift;
   q.x += q.vx*dt*(q.spooked ? 1.2 : 1);
   if(q.escaping) q.x += Math.sign(q.x||1)*700*dt;      /* breaks for the dunes */
-  if(s.fly) q.y = 2300 + Math.sin(q.t*0.75)*380 + (q.spooked ? 500 : 0);
+  if(s.fly) q.y = 2350 + Math.sin(q.t*1.05)*560 + (q.spooked ? 700 : 0);
   const rel = q.z - position;
   /* Turn it back before it runs outside the arc you can physically aim
      through — otherwise it wanders off at 90° and the shot is impossible
@@ -945,8 +945,8 @@ function arrowsStep(dt){
         const ax = a.dx - a.vx*dt*(1-t);
         const ay = a.dy - a.vy*dt*(1-t);
         const size = quarry.spec.size;
-        if(Math.abs(ax - quarry.x) < size*1.00 &&
-           Math.abs(ay - (-CAM_H + quarry.y + size*0.5)) < size*0.60){
+        if(Math.abs(ax - quarry.x) < size*0.52 &&
+           Math.abs(ay - (-CAM_H + quarry.y + size*0.5)) < size*0.38){
           hitQuarry();
         }
       }
@@ -1115,8 +1115,8 @@ let t0=null, progress=0, position=0, playerX=0, lastTs=0, frameId=0;
    closer to a real free-look. */
 let yaw = 0, pitch = 0, yawTarget = 0, pitchTarget = 0;
 let dragging = false, dragX = 0, dragY = 0, dragMoved = 0, freeLook = false;
-let YAW_MAX = 1.30;               /* opened further once there is a target */
-let PITCH_MAX = 0.45;
+let YAW_MAX = 0.72;               /* opened further once there is a target */
+let PITCH_MAX = 0.28;
 const isCoarse = matchMedia && matchMedia('(pointer: coarse)').matches;
 
 /* Drag right, look right. It used to be the other way round — the signs were
@@ -1326,10 +1326,10 @@ function drawFrame(ts){
      covers the frame — without this you are looking at bare sky where the
      ground should be. Its top edge is the highest ground vertex on screen, so
      it can never show above the real terrain the way a fixed horizon did. */
-  let topY = horizonY;
-  for(const seg of drawn){
-    topY = Math.min(topY, seg.p1.screen.y, (seg.p2draw||seg.p2).screen.y);
-  }
+  /* Anchored to the far end of the road, not to the highest vertex on screen.
+     On a downhill the far segments project high, so the old top edge climbed
+     well above the horizon and laid sand across the sky. */
+  const topY = horizonY;
   const bd = cx.createLinearGradient(0, topY-2, 0, Ht);
   bd.addColorStop(0, fogCol);
   bd.addColorStop(.30, mixCol(SAND.midShade, fogCol, 0.45));
@@ -1445,15 +1445,18 @@ function drawFrame(ts){
      Beyond the drawn road there is no accumulated curve to place it against,
      so it sits at the vanishing point until the road reaches it. */
   const lmRel = landmarkZ - position;
-  if(lmRel > 300){
+  if(lmRel > 300 && lmRel < 150000){       /* a shape on the horizon, then a place */
     const lscale = camDepth/lmRel;
     const lseg = segments[Math.floor(landmarkZ/SEG_LEN)];
     let lx, ly;
     if(lseg && lseg.frame === frameId){
       lx = lseg.p1.screen.x; ly = lseg.p1.screen.y;
     } else if(drawn.length){
+      /* Beyond the drawn road, sit on the horizon line rather than on the far
+         segment — that one rises and falls with the hills and made the whole
+         destination bob about in the distance. */
       const far = drawn[drawn.length-1], fp = far.p2draw || far.p2;
-      lx = fp.screen.x; ly = fp.screen.y;
+      lx = fp.screen.x; ly = horizonY;
     } else {
       lx = Wd/2 + viewShiftX; ly = horizonY;
     }
@@ -1461,7 +1464,7 @@ function drawFrame(ts){
     if(lk > 0.05){
       cx.save();
       /* it fades up out of the haze rather than popping in */
-      cx.globalAlpha = Math.max(0.25, Math.min(1, 1.35 - lmRel/90000));
+      cx.globalAlpha = Math.max(0.18, Math.min(1, 1.10 - lmRel/165000));
       groundShadow(lx, ly + 2, 90*lk, 20*lk, .28);
       landmark(KIND, lx, ly, lk);
       cx.restore();
@@ -1527,8 +1530,12 @@ function drawFrame(ts){
   /* --- the hunt --- */
   if(!quarry && progress > 0.14 && progress < 0.26) spawnQuarry();
   const hunting = !!(quarry && quarry.alive && !hunted);
-  YAW_MAX   = hunting ? 1.75 : 1.30;      /* ±100° hunting, ±74° otherwise */
-  PITCH_MAX = hunting ? 0.80 : 0.45;
+  /* The image shifts by tan(yaw)·camDepth·W/2. Past about 60° tan runs away
+     and at 90° it flips sign, so the whole world slides out of frame — that is
+     what the void behind you was, and what pulled the horizon apart. 54° is as
+     far as this projection stays honest, and the aim only ever needs ±40°. */
+  YAW_MAX   = hunting ? 0.95 : 0.72;      /* ±54° hunting, ±41° otherwise */
+  PITCH_MAX = hunting ? 0.42 : 0.28;
   if(quarry){
     quarryStep(dt, ts);
     arrowsStep(dt);
