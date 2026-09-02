@@ -465,20 +465,49 @@ function prop(k,x,y,s,flip){
   cx.restore();
 }
 
-/* a camel from behind, which is what you see when following someone */
-function camelRear(x, y, s, robe){
+/* a camel in profile, for the caravan station landmark. The old side-view
+   camel() went away in the 3D rewrite but the landmark still called it, which
+   crashed the whole ride the moment you travelled to ایستگاه شتر. */
+function camelSide(x, y, s){
   cx.save(); cx.translate(x,y); cx.scale(s,s);
-  groundShadow(0, 4, 34, 9, .32);
+  cx.strokeStyle='#7b5c3c'; cx.lineWidth=6; cx.lineCap='round';
+  for(const px of [-18,-9,12,20]){
+    cx.beginPath(); cx.moveTo(px,-34); cx.lineTo(px+3,0); cx.stroke();
+  }
+  cx.fillStyle='#a97f52';
+  cx.beginPath(); cx.ellipse(0,-44,30,15,0,0,7); cx.fill();
+  cx.beginPath(); cx.ellipse(-2,-57,13,11,0,0,7); cx.fill();
+  cx.beginPath(); cx.moveTo(22,-48); cx.quadraticCurveTo(38,-58,36,-74);
+  cx.lineTo(30,-74); cx.quadraticCurveTo(30,-58,17,-42); cx.closePath(); cx.fill();
+  cx.beginPath(); cx.ellipse(35,-77,10,6,-0.3,0,7); cx.fill();
+  cx.restore();
+}
+
+/* a camel from behind, which is what you see when following someone */
+function camelRear(x, y, s, robe, gait){
+  const g = gait || 0;
+  const sway = Math.sin(g)*2.2, lift = Math.abs(Math.sin(g*2))*2.4;
+  cx.save(); cx.translate(x, y - lift*s); cx.scale(s, s);
+  cx.rotate(Math.sin(g)*0.02);
+  groundShadow(0, 4 + lift, 34, 9, .30);
 
   const hide = cx.createLinearGradient(-28,-70,26,-20);
   hide.addColorStop(0,'#d3a97a');
   hide.addColorStop(.45,'#b98f60'); hide.addColorStop(1,'#8a6740');
 
+  /* legs actually walk — they used to be two static lines, which is why it
+     looked like it was being dragged along rather than moving */
+  const swingL = Math.sin(g)*5, swingR = Math.sin(g + Math.PI)*5;
   cx.strokeStyle='#8a6740'; cx.lineWidth=8; cx.lineCap='round';
-  cx.beginPath(); cx.moveTo(-14,-32); cx.quadraticCurveTo(-18,-14,-16,2);
-  cx.moveTo(14,-32); cx.quadraticCurveTo(18,-14,16,2); cx.stroke();
+  cx.beginPath();
+  cx.moveTo(-14,-32); cx.quadraticCurveTo(-18+swingL,-14,-16+swingL*1.6,2);
+  cx.moveTo(14,-32);  cx.quadraticCurveTo(18+swingR,-14,16+swingR*1.6,2);
+  cx.stroke();
   cx.fillStyle='#6f522f';
-  cx.beginPath(); cx.ellipse(-16,3,6,3,0,0,7); cx.ellipse(16,3,6,3,0,0,7); cx.fill();
+  cx.beginPath();
+  cx.ellipse(-16+swingL*1.6,3,6,3,0,0,7);
+  cx.ellipse(16+swingR*1.6,3,6,3,0,0,7); cx.fill();
+  cx.translate(sway*0.4, 0);
 
   cx.fillStyle=hide;
   cx.beginPath(); cx.ellipse(0,-46,26,24,0,0,7); cx.fill();
@@ -577,7 +606,7 @@ function landmark(kind, x, groundY, s){
     cx.fillStyle=stoneD; cx.fillRect(-70,-30,140,30);
     cx.fillStyle='#8a6a46';
     for(const dx of [-40,0,40]){cx.beginPath();cx.moveTo(dx-22,-30);cx.lineTo(dx,-56);cx.lineTo(dx+22,-30);cx.closePath();cx.fill();}
-    camel(46,0,.55,'#a97f52','#7b5c3c',0);
+    camelSide(48, 0, 0.55);
   } else if(kind==='river'){
     cx.fillStyle='#4f8fa8'; cx.beginPath(); cx.ellipse(0,-6,120,20,0,0,7); cx.fill();
     cx.fillStyle='#7fc0d4'; cx.beginPath(); cx.ellipse(-18,-10,74,9,0,0,7); cx.fill();
@@ -1295,9 +1324,11 @@ function drawFrame(ts){
   /* --- pass 1: project everything, front to back --- */
   let x=0, dx=-(base.curve*basePercent), maxy=Ht+200;
   const drawn=[];
+  let lastIter = base.index;
   for(let n=0;n<DRAW_DIST;n++){
     const i = base.index+n;
     if(i >= segments.length) break;
+    lastIter = i;
     const seg = segments[i];
     project(seg.p1, playerX*ROAD_W - x,      camY, position, Wd, Ht);
     project(seg.p2, playerX*ROAD_W - x - dx, camY, position, Wd, Ht);
@@ -1320,16 +1351,20 @@ function drawFrame(ts){
   const horizonY = drawn.length
     ? (drawn[drawn.length-1].p2draw || drawn[drawn.length-1].p2).screen.y : Ht*0.45;
 
-  drawSky(ts, Math.max(30, horizonY));
+  drawSky(ts, Math.max(30, Math.min(horizonY, Ht/2 + viewShiftY)));
 
   /* A backdrop under the terrain. Turn far enough and the road strip no longer
      covers the frame — without this you are looking at bare sky where the
      ground should be. Its top edge is the highest ground vertex on screen, so
      it can never show above the real terrain the way a fixed horizon did. */
-  /* Anchored to the far end of the road, not to the highest vertex on screen.
-     On a downhill the far segments project high, so the old top edge climbed
-     well above the horizon and laid sand across the sky. */
-  const topY = horizonY;
+  /* The drawn road only reaches ~15,000 units, so its far edge sits BELOW the
+     camera's true horizon. Ground filled only to that edge left a band of sky
+     where distant land should be — and anything further away than the road,
+     the destination included, was drawn correctly above that edge and so
+     appeared to hang in the air. The ground now runs all the way to the true
+     horizon, which is where it belongs. */
+  const trueHorizon = Ht/2 + viewShiftY;
+  const topY = Math.min(horizonY, trueHorizon);
   const bd = cx.createLinearGradient(0, topY-2, 0, Ht);
   bd.addColorStop(0, fogCol);
   bd.addColorStop(.30, mixCol(SAND.midShade, fogCol, 0.45));
@@ -1378,7 +1413,7 @@ function drawFrame(ts){
                 b === 0 ? mixCol(hazed, '#fff2d2', facingSun ? 0.30 : 0.12) : null);
     }
   }
-  drawGrain(Math.max(0, horizonY-10), 0.15);
+  drawGrain(Math.max(0, Math.min(horizonY, Ht/2 + viewShiftY) - 10), 0.15);
 
   /* --- the track, far to near ---
      An early-Islamic caravan road is a worn strip of dirt, not paving: no kerb,
@@ -1441,29 +1476,46 @@ function drawFrame(ts){
     }
   }
 
+  /* Horizon haze belongs between the land and the things standing on it.
+     Painted before the road, the road sat crisply on top of it and looked like
+     it floated; painted after everything, it washed over the destination and
+     the other riders, which is what made them look like they were behind it.
+     Here it veils the distant ground only — objects carry their own distance
+     fade, so they stay solid when they are close. */
+  const skyLine = Math.min(horizonY, Ht/2 + viewShiftY);
+  const hz = cx.createLinearGradient(0, skyLine-30, 0, skyLine+30);
+  hz.addColorStop(0,   mixCol(fogCol,'#ffffff',0.13));
+  hz.addColorStop(.45, mixCol(fogCol,'#ffffff',0.04));
+  hz.addColorStop(1,   'rgba(255,255,255,0)');
+  cx.fillStyle = hz; cx.fillRect(0, skyLine-30, Wd, 60);
+
   /* --- the destination itself, visible the whole way in ---
      Beyond the drawn road there is no accumulated curve to place it against,
      so it sits at the vanishing point until the road reaches it. */
+  /* --- the destination itself ---
+     Projected exactly, at any distance. It used to be pinned to the horizon
+     line until it came inside the draw distance, which on a 38-second ride is
+     the last two seconds — so for the whole approach it hung on the skyline and
+     merely grew, instead of descending onto the ground as you closed on it.
+
+     Vertical position comes from the track's own elevation at that point.
+     Horizontal needs the accumulated curve, which the draw loop only builds as
+     far as it draws, so carry it the rest of the way — two additions per
+     segment, no projection. */
   const lmRel = landmarkZ - position;
-  if(lmRel > 300 && lmRel < 150000){       /* a shape on the horizon, then a place */
-    const lscale = camDepth/lmRel;
-    const lseg = segments[Math.floor(landmarkZ/SEG_LEN)];
-    let lx, ly;
-    if(lseg && lseg.frame === frameId){
-      lx = lseg.p1.screen.x; ly = lseg.p1.screen.y;
-    } else if(drawn.length){
-      /* Beyond the drawn road, sit on the horizon line rather than on the far
-         segment — that one rises and falls with the hills and made the whole
-         destination bob about in the distance. */
-      const far = drawn[drawn.length-1], fp = far.p2draw || far.p2;
-      lx = fp.screen.x; ly = horizonY;
-    } else {
-      lx = Wd/2 + viewShiftX; ly = horizonY;
+  const lmIndex = Math.min(segments.length-1, Math.floor(landmarkZ/SEG_LEN));
+  if(lmRel > 300 && lmRel < 150000){
+    let xa = x, dxa = dx;
+    for(let i = lastIter + 1; i <= lmIndex; i++){
+      xa += dxa; dxa += segments[i].curve;
     }
+    const lseg = segments[lmIndex];
+    const lscale = camDepth/lmRel;
+    const lx = Wd/2 + lscale*(xa - playerX*ROAD_W)*Wd/2 + viewShiftX;
+    const ly = Ht/2 - lscale*(lseg.p1.world.y - camY)*Ht/2 + viewShiftY;
     const lk = Math.min(5.5, LANDMARK_SIZE * lscale * Ht/2 / LANDMARK_UNITS);
-    if(lk > 0.05){
+    if(lk > 0.05 && ly > -Ht && ly < Ht*2){
       cx.save();
-      /* it fades up out of the haze rather than popping in */
       cx.globalAlpha = Math.max(0.18, Math.min(1, 1.10 - lmRel/165000));
       groundShadow(lx, ly + 2, 90*lk, 20*lk, .28);
       landmark(KIND, lx, ly, lk);
@@ -1500,61 +1552,34 @@ function drawFrame(ts){
     if(rel < 60) continue;
     const seg = segments[Math.floor(r.z/SEG_LEN)];
     if(!seg || seg.frame !== frameId) continue;
+    /* Interpolate along the segment. Snapping to seg.p1 meant the rider stayed
+       put for a whole segment and then jumped 200 units — that is the shaking. */
+    const frac = (r.z % SEG_LEN)/SEG_LEN;
+    const p2s = seg.p2;
     const scale = camDepth/Math.max(1, rel);
-    const sx = seg.p1.screen.x + scale*r.offset*ROAD_W*Wd/2;
-    const sy = seg.p1.screen.y;
+    const sx = (seg.p1.screen.x + (p2s.screen.x - seg.p1.screen.x)*frac)
+             + scale*r.offset*ROAD_W*Wd/2;
+    const sy = seg.p1.screen.y + (p2s.screen.y - seg.p1.screen.y)*frac;
     /* Scaled from a real world height, like the quarry. The old flat factor
        drew a camel and rider a few pixels tall at any useful distance. */
     const k  = Math.min(3.2, RIDER_SIZE * scale * Ht/2 / CAMEL_UNITS);
     if(sy < 0 || sy > Ht+300 || k < 0.03) continue;
     cx.save();
     cx.globalAlpha = Math.max(0, 1-(seg.fogAmt||0));
-    camelRear(sx, sy, k, r.robe);
+    /* One more pass of smoothing: interpolating inside a segment fixes the
+       200-unit snap, but the slope still changes abruptly at each segment
+       boundary, which shows as a vertical twitch when the rider is close. */
+    if(r.sx === undefined || Math.abs(sy - r.sy) > Ht*0.5){ r.sx = sx; r.sy = sy; }
+    else { r.sx += (sx - r.sx)*Math.min(1, dt*14); r.sy += (sy - r.sy)*Math.min(1, dt*14); }
+
+    r.gait = (r.gait || 0) + dt*(5.2 + r.rel*0.0012);
+    camelRear(r.sx, r.sy, k, r.robe, r.gait);
     if(k > 0.20){
       cx.fillStyle='rgba(255,244,220,.92)';
       cx.font=`${Math.min(22, 11+k*5)}px system-ui`; cx.textAlign='center';
-      cx.fillText(r.name, sx, sy - CAMEL_UNITS*k - 8);
+      cx.fillText(r.name, r.sx, r.sy - CAMEL_UNITS*k - 8);
     }
     cx.restore();
-  }
-
-  /* The horizon haze goes on LAST of the distant layers. Drawn before the
-     road, it sat underneath it — which is what made the track look like it
-     floated above the ground and carried on through the horizon. */
-  const hz = cx.createLinearGradient(0, horizonY-34, 0, horizonY+30);
-  hz.addColorStop(0,   mixCol(fogCol,'#ffffff',0.16));
-  hz.addColorStop(.45, mixCol(fogCol,'#ffffff',0.05));
-  hz.addColorStop(1,   'rgba(255,255,255,0)');
-  cx.fillStyle = hz; cx.fillRect(0, horizonY-34, Wd, 64);
-
-  /* --- the hunt --- */
-  if(!quarry && progress > 0.14 && progress < 0.26) spawnQuarry();
-  const hunting = !!(quarry && quarry.alive && !hunted);
-  /* The image shifts by tan(yaw)·camDepth·W/2. Past about 60° tan runs away
-     and at 90° it flips sign, so the whole world slides out of frame — that is
-     what the void behind you was, and what pulled the horizon apart. 54° is as
-     far as this projection stays honest, and the aim only ever needs ±40°. */
-  YAW_MAX   = hunting ? 0.95 : 0.72;      /* ±54° hunting, ±41° otherwise */
-  PITCH_MAX = hunting ? 0.42 : 0.28;
-  if(quarry){
-    quarryStep(dt, ts);
-    arrowsStep(dt);
-    drawQuarryAndArrows(ts);
-    const active = quarry.alive && !hunted && quiver > 0;
-    document.getElementById('hunt').style.display = active ? 'flex' : 'none';
-    if(active) drawCrosshair();
-    if(pulling){
-      pullPower = Math.min(1, (performance.now()-pullStart)/DRAW_TIME);
-      document.getElementById('drawFill').style.width = (pullPower*100)+'%';
-    }
-    /* Out of arrows means it starts running, not that it has already gone.
-       Announcing the escape while the animal was still plainly on screen was
-       just wrong — the message now waits until it has actually left. */
-    if(!hunted && quiver === 0 && arrows.length === 0) quarry.escaping = true;
-    if(!hunted && !quarry.alive && !huntSent){
-      showHunt(quarry.spec.fa + ' فرار کرد');
-      reportHunt(false);
-    }
   }
 
   povCamel(ts, playerX*6);
