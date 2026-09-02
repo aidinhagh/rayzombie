@@ -1582,6 +1582,33 @@ function drawFrame(ts){
     cx.restore();
   }
 
+  /* --- the hunt --- */
+  if(!quarry && progress > 0.14 && progress < 0.26) spawnQuarry();
+  const hunting = !!(quarry && quarry.alive && !hunted);
+  /* The image shifts by tan(yaw)·camDepth·W/2. Past about 60° tan runs away
+     and at 90° it flips sign, so the whole world slides out of frame. 54° is
+     as far as this projection stays honest, and the aim only needs ±40°. */
+  YAW_MAX   = hunting ? 0.95 : 0.72;
+  PITCH_MAX = hunting ? 0.42 : 0.28;
+  if(quarry){
+    quarryStep(dt, ts);
+    arrowsStep(dt);
+    drawQuarryAndArrows(ts);
+    const active = quarry.alive && !hunted && quiver > 0;
+    document.getElementById('hunt').style.display = active ? 'flex' : 'none';
+    if(active) drawCrosshair();
+    if(pulling){
+      pullPower = Math.min(1, (performance.now()-pullStart)/DRAW_TIME);
+      document.getElementById('drawFill').style.width = (pullPower*100)+'%';
+    }
+    /* Out of arrows means it starts running, not that it has already gone. */
+    if(!hunted && quiver === 0 && arrows.length === 0) quarry.escaping = true;
+    if(!hunted && !quarry.alive && !huntSent){
+      showHunt(quarry.spec.fa + ' فرار کرد');
+      reportHunt(false);
+    }
+  }
+
   povCamel(ts, playerX*6);
 
   const gritNow = lerp(Wbase.grit, W.grit, Wblend || (W===Wbase?0:1));
