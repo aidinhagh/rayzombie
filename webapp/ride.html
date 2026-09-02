@@ -127,10 +127,25 @@ const cv = document.getElementById('c'), cx = cv.getContext('2d');
 let Wd=0, Ht=0;
 function resize(){
   const r = Math.min(window.devicePixelRatio||1, 2);
-  Wd = cv.clientWidth; Ht = cv.clientHeight;
+  Wd = cv.clientWidth || window.innerWidth || 0;
+  Ht = cv.clientHeight || window.innerHeight || 0;
+  if(!Wd || !Ht) return false;
   cv.width = Wd*r; cv.height = Ht*r; cx.setTransform(r,0,0,r,0,0);
+  return true;
 }
 addEventListener('resize', resize);
+addEventListener('orientationchange', resize);
+if (tg && tg.onEvent) tg.onEvent('viewportChanged', resize);
+
+/* The canvas is measured every frame, not once at startup. A Mini App sheet
+   animates in, so clientWidth is very often still 0 when the page first runs:
+   every projection then divided by zero, nothing was drawn, and it never
+   recovered because window.resize does not necessarily fire afterwards. That
+   is the black screen. */
+function ensureSize(){
+  if(!Wd || !Ht || cv.clientWidth !== Wd || cv.clientHeight !== Ht) return resize();
+  return true;
+}
 
 /* ======================= weather ======================= */
 const WEATHER = {
@@ -242,7 +257,9 @@ const BANDS = [
   {x:  9.5*ROAD_W, amp:  190, freq: 0.023},
 ];
 
-let segments = [], trackLength = 0;
+let segments = [], trackLength = 0, landmarkZ = 0;
+const LANDMARK_SIZE = 9000;         /* world units tall */
+const LANDMARK_UNITS = 100;         /* the drawing's own height */
 
 function lastY(){ return segments.length===0 ? 0 : segments[segments.length-1].p2.world.y; }
 
@@ -356,7 +373,11 @@ function scatterProps(){
       });
     }
   }
-  segments[segments.length-16].sprites.push({type:'landmark', offset:0, scale:1});
+  /* The landmark is NOT a segment sprite. Sprites only render inside the draw
+     distance (~15,000 units of a 300,000-unit road), so the Kaaba appeared for
+     the last two seconds and was then covered by the arrival card. It is
+     projected separately below, from any distance. */
+  landmarkZ = trackLength - 1600;
 }
 
 function groundShadow(x, y, w, h, a){
@@ -663,7 +684,7 @@ function buildGrain(){
 }
 
 function drawGrain(fromY, alpha){
-  if(!grainPattern) return;
+  if(!grainPattern){ if(Wd && Ht) buildGrain(); return; }
   cx.save();
   cx.globalCompositeOperation = 'overlay';
   cx.globalAlpha = alpha;
@@ -693,13 +714,61 @@ function drawGrit(t, strength){
   cx.restore(); cx.globalAlpha=1;
 }
 
-function drawRain(t){
-  cx.save(); cx.strokeStyle='rgba(196,214,220,.5)'; cx.lineWidth=1.4;
-  for(let i=0;i<140;i++){
-    const x = ((i*97 + t*0.6) % (Wd+120)) - 60;
-    const y = ((i*61 + t*1.9) % (Ht+80)) - 40;
-    cx.beginPath(); cx.moveTo(x,y); cx.lineTo(x-7,y+18); cx.stroke();
+/* Layered translucent sheets drifting across at different speeds. A single
+   field of specks reads as noise; sheets read as weather moving through. */
+function drawSheets(t, strength, tint){
+  if(strength <= 0.05) return;
+  cx.save();
+  for(let layer=0; layer<3; layer++){
+    const sp = 0.06 + layer*0.11, amp = 26 + layer*22;
+    const yBase = Ht*(0.30 + layer*0.16);
+    cx.globalAlpha = strength * (0.20 - layer*0.045);
+    cx.fillStyle = tint;
+    cx.beginPath();
+    cx.moveTo(-40, Ht+40);
+    for(let x=-40; x<=Wd+40; x+=26){
+      const ph = (x*0.006) + t*0.001*sp*10 + layer*2.1;
+      cx.lineTo(x, yBase + Math.sin(ph)*amp + Math.sin(ph*2.3+1.2)*amp*0.4);
+    }
+    cx.lineTo(Wd+40, Ht+40);
+    cx.closePath(); cx.fill();
   }
+  cx.restore();
+}
+
+function drawVignette(strength){
+  if(strength <= 0.02) return;
+  const g = cx.createRadialGradient(Wd/2, Ht*0.45, Math.min(Wd,Ht)*0.25,
+                                    Wd/2, Ht*0.45, Math.max(Wd,Ht)*0.75);
+  g.addColorStop(0, 'rgba(0,0,0,0)');
+  g.addColorStop(1, `rgba(24,16,8,${0.55*strength})`);
+  cx.fillStyle = g; cx.fillRect(0,0,Wd,Ht);
+}
+
+function drawRain(t){
+  cx.save();
+  for(let layer=0; layer<3; layer++){
+    const n = 60, len = 14 + layer*10, sp = 1.4 + layer*0.9;
+    cx.strokeStyle = `rgba(198,216,224,${0.22 + layer*0.14})`;
+    cx.lineWidth = 1 + layer*0.6;
+    cx.beginPath();
+    for(let i=0;i<n;i++){
+      const x = ((i*97 + layer*31 + t*0.5*sp) % (Wd+140)) - 70;
+      const y = ((i*61 + layer*47 + t*sp) % (Ht+100)) - 50;
+      cx.moveTo(x,y); cx.lineTo(x - len*0.4, y + len);
+    }
+    cx.stroke();
+  }
+  /* spatter bouncing off the ground */
+  cx.strokeStyle = 'rgba(210,226,230,.35)'; cx.lineWidth = 1.2;
+  cx.beginPath();
+  for(let i=0;i<26;i++){
+    const x = ((i*137 + Math.floor(t/220)*53) % Wd);
+    const y = Ht*0.62 + ((i*29) % Math.max(1, Ht*0.34));
+    const r = 3 + (i % 4);
+    cx.moveTo(x-r, y); cx.quadraticCurveTo(x, y-r*1.4, x+r, y);
+  }
+  cx.stroke();
   cx.restore();
 }
 
@@ -763,12 +832,22 @@ function drawSky(t, horizonY){
 /* Weave and drift roughly halved and the hit boxes widened: leading the target
    should be something you feel, not a calculation you have to get right to the
    pixel. */
+/* `size` is the animal's height in world units. The sprite is scaled FROM it
+   and the hit box is derived FROM it, so what you see and what you can hit are
+   the same object. They used to be set independently: the drawing was about
+   three times the height of its own hit box, so putting the crosshair on the
+   animal's body aimed above the box entirely and the arrow sailed over.
+   `speed` is a fraction of your pace — near 1 keeps it in front of you for a
+   long stretch instead of falling behind in a few seconds. */
+const SPRITE_UNITS = 90;            /* feet-to-head, in the sprite's own units */
+const CAMEL_UNITS = 112;            /* the same, for camelRear() */
+const RIDER_SIZE = 2400;            /* camel plus rider, in world units */
 const QUARRY = {
-  lion:  {fa:'شیر',   h: 420, speed: 0.74, weave: 0.55, drift: 340, fly:false, radius: 640},
-  tiger: {fa:'ببر',   h: 400, speed: 0.78, weave: 0.75, drift: 440, fly:false, radius: 610},
-  deer:  {fa:'آهو',   h: 430, speed: 0.84, weave: 1.10, drift: 560, fly:false, radius: 560},
-  zebra: {fa:'گورخر', h: 440, speed: 0.80, weave: 0.80, drift: 490, fly:false, radius: 590},
-  eagle: {fa:'عقاب',  h: 240, speed: 0.88, weave: 1.20, drift: 540, fly:true,  radius: 480},
+  lion:  {fa:'شیر',   size: 1600, speed: 0.950, weave: 0.55, drift: 340, fly:false},
+  tiger: {fa:'ببر',   size: 1550, speed: 0.955, weave: 0.75, drift: 440, fly:false},
+  deer:  {fa:'آهو',   size: 1400, speed: 0.965, weave: 1.10, drift: 560, fly:false},
+  zebra: {fa:'گورخر', size: 1500, speed: 0.958, weave: 0.80, drift: 490, fly:false},
+  eagle: {fa:'عقاب',  size: 1050, speed: 0.968, weave: 1.20, drift: 540, fly:true},
 };
 
 const ARROWS = 4;
@@ -802,8 +881,8 @@ function quarryStep(dt, ts){
   /* Once you are out of arrows it breaks away for real, pulls ahead and
      shrinks into the distance — so the escape is something you watch happen. */
   const pace = q.escaping
-    ? cruise * 1.22
-    : cruise * Math.min(0.97, s.speed * (q.spooked ? 1.08 : 1.0));
+    ? cruise * 1.30
+    : cruise * Math.min(0.995, s.speed * (q.spooked ? 1.02 : 1.0));
   q.z += pace*dt;
   /* weaving: the whole reason a straight shot does not work */
   q.vx = Math.sin(q.t*s.weave*0.9)*700 + Math.sin(q.t*s.weave*0.37+1.1)*430
@@ -818,7 +897,7 @@ function quarryStep(dt, ts){
   if(Math.abs(q.x) > rel*0.80) q.dir = -Math.sign(q.x);
   /* Once it is level with you the shot is gone — and at that range even a
      small sideways offset needs an impossible angle. */
-  if(rel > 22000 || rel < 1300 || Math.abs(q.x) > 16000) q.alive = false;
+  if(rel > 26000 || rel < 900 || Math.abs(q.x) > 18000) q.alive = false;
 }
 
 function loose(power){
@@ -865,9 +944,9 @@ function arrowsStep(dt){
         const t = (qz - pz)/Math.max(1, a.dz - pz);
         const ax = a.dx - a.vx*dt*(1-t);
         const ay = a.dy - a.vy*dt*(1-t);
-        const r = quarry.spec.radius;
-        if(Math.abs(ax - quarry.x) < r &&
-           Math.abs(ay - (-CAM_H + quarry.y + quarry.spec.h*0.5)) < r*0.85){
+        const size = quarry.spec.size;
+        if(Math.abs(ax - quarry.x) < size*1.00 &&
+           Math.abs(ay - (-CAM_H + quarry.y + size*0.5)) < size*0.60){
           hitQuarry();
         }
       }
@@ -1001,9 +1080,10 @@ function drawQuarryAndArrows(ts){
       const sy = Ht/2 - scale*(-CAM_H + quarry.y)*Ht/2 + viewShiftY;
       /* Size it against its own hit box, so what you see is what you can hit.
          The old flat multiplier drew a deer about one pixel wide at range. */
-      /* Sized against its own hit box, then capped: a lion you have caught up
-         with was filling half the screen. */
-      const k = Math.min(1.55, scale*Wd*0.55 * (quarry.spec.radius/27));
+      /* Scale straight from its world height, so the drawing and the hit box
+         are the same size. Capped so a lion you have caught up with does not
+         fill the screen. */
+      const k = Math.min(2.6, quarry.spec.size * scale * Ht/2 / SPRITE_UNITS);
       if(k > 0.02 && sy > -300 && sy < Ht+400){
         cx.save();
         cx.globalAlpha = Math.max(0.25, 1 - rel/26000);
@@ -1035,8 +1115,8 @@ let t0=null, progress=0, position=0, playerX=0, lastTs=0, frameId=0;
    closer to a real free-look. */
 let yaw = 0, pitch = 0, yawTarget = 0, pitchTarget = 0;
 let dragging = false, dragX = 0, dragY = 0, dragMoved = 0, freeLook = false;
-let YAW_MAX = 0.75;               /* opened right up once there is a target */
-let PITCH_MAX = 0.22;
+let YAW_MAX = 1.30;               /* opened further once there is a target */
+let PITCH_MAX = 0.45;
 const isCoarse = matchMedia && matchMedia('(pointer: coarse)').matches;
 
 /* Drag right, look right. It used to be the other way round — the signs were
@@ -1149,7 +1229,7 @@ function drawRidge(drawn, band, side, fill, crest){
      Closing at (edge, -60) drew a diagonal from the far crest to the corner —
      a huge wedge of sand across the sky, which only became obvious once the
      camera could turn and the ridge line moved away from the screen edge. */
-  const outer = sgn < 0 ? -60 : Wd + 60;
+  const outer = sgn < 0 ? -Wd*2 : Wd*3;
   cx.beginPath();
   traceRidge(pts);
   cx.lineTo(pts[pts.length-1][0], Ht+30);
@@ -1170,6 +1250,22 @@ function drawRidge(drawn, band, side, fill, crest){
 }
 
 function frame(ts){
+  if(!ensureSize()){          /* not laid out yet — wait, do not die */
+    requestAnimationFrame(frame);
+    return;
+  }
+  try {
+    drawFrame(ts);
+  } catch (err) {
+    /* One bad frame used to stop requestAnimationFrame for good, leaving a
+       frozen or black canvas with no clue why. */
+    console.error(err);
+    warn('خطای نمایش: ' + (err && err.message ? err.message : err));
+  }
+  if(progress < 1) requestAnimationFrame(frame);
+}
+
+function drawFrame(ts){
   if(t0===null){ t0=ts; lastTs=ts; }
   const dt = Math.min(0.05, (ts-lastTs)/1000); lastTs = ts;
 
@@ -1185,7 +1281,7 @@ function frame(ts){
      during a hunt made the shot impossible: you would aim, let go to reach the
      bow, and the view would slide off the animal before you could loose. */
   const aiming = !!(quarry && quarry.alive && !hunted && quiver > 0);
-  if(!aiming && !dragging && !freeLook){ yawTarget *= 0.94; pitchTarget *= 0.94; }
+  if(!aiming && !dragging && !freeLook){ yawTarget *= 0.985; pitchTarget *= 0.985; }
   yaw   += (yawTarget   - yaw)   * Math.min(1, dt*9);
   pitch += (pitchTarget - pitch) * Math.min(1, dt*9);
   viewShiftX = -Math.tan(yaw)   * camDepth * Wd/2;
@@ -1225,6 +1321,20 @@ function frame(ts){
     ? (drawn[drawn.length-1].p2draw || drawn[drawn.length-1].p2).screen.y : Ht*0.45;
 
   drawSky(ts, Math.max(30, horizonY));
+
+  /* A backdrop under the terrain. Turn far enough and the road strip no longer
+     covers the frame — without this you are looking at bare sky where the
+     ground should be. Its top edge is the highest ground vertex on screen, so
+     it can never show above the real terrain the way a fixed horizon did. */
+  let topY = horizonY;
+  for(const seg of drawn){
+    topY = Math.min(topY, seg.p1.screen.y, (seg.p2draw||seg.p2).screen.y);
+  }
+  const bd = cx.createLinearGradient(0, topY-2, 0, Ht);
+  bd.addColorStop(0, fogCol);
+  bd.addColorStop(.30, mixCol(SAND.midShade, fogCol, 0.45));
+  bd.addColorStop(1, mixCol(SAND.deep, SAND.midShade, 0.5));
+  cx.fillStyle = bd; cx.fillRect(0, topY-2, Wd, Ht-topY+4);
 
   /* --- ground plane, fogged at the horizon --- */
   /* --- ground, one full-width quad per segment ---
@@ -1331,6 +1441,33 @@ function frame(ts){
     }
   }
 
+  /* --- the destination itself, visible the whole way in ---
+     Beyond the drawn road there is no accumulated curve to place it against,
+     so it sits at the vanishing point until the road reaches it. */
+  const lmRel = landmarkZ - position;
+  if(lmRel > 300){
+    const lscale = camDepth/lmRel;
+    const lseg = segments[Math.floor(landmarkZ/SEG_LEN)];
+    let lx, ly;
+    if(lseg && lseg.frame === frameId){
+      lx = lseg.p1.screen.x; ly = lseg.p1.screen.y;
+    } else if(drawn.length){
+      const far = drawn[drawn.length-1], fp = far.p2draw || far.p2;
+      lx = fp.screen.x; ly = fp.screen.y;
+    } else {
+      lx = Wd/2 + viewShiftX; ly = horizonY;
+    }
+    const lk = Math.min(5.5, LANDMARK_SIZE * lscale * Ht/2 / LANDMARK_UNITS);
+    if(lk > 0.05){
+      cx.save();
+      /* it fades up out of the haze rather than popping in */
+      cx.globalAlpha = Math.max(0.25, Math.min(1, 1.35 - lmRel/90000));
+      groundShadow(lx, ly + 2, 90*lk, 20*lk, .28);
+      landmark(KIND, lx, ly, lk);
+      cx.restore();
+    }
+  }
+
   /* --- sprites, far to near --- */
   for(let i=drawn.length-1;i>=0;i--){
     const seg = drawn[i];
@@ -1363,15 +1500,17 @@ function frame(ts){
     const scale = camDepth/Math.max(1, rel);
     const sx = seg.p1.screen.x + scale*r.offset*ROAD_W*Wd/2;
     const sy = seg.p1.screen.y;
-    const k  = scale*Wd*0.55;
-    if(sy < 0 || sy > Ht+300 || k < 0.02) continue;
+    /* Scaled from a real world height, like the quarry. The old flat factor
+       drew a camel and rider a few pixels tall at any useful distance. */
+    const k  = Math.min(3.2, RIDER_SIZE * scale * Ht/2 / CAMEL_UNITS);
+    if(sy < 0 || sy > Ht+300 || k < 0.03) continue;
     cx.save();
     cx.globalAlpha = Math.max(0, 1-(seg.fogAmt||0));
-    camelRear(sx, sy, k*1.2, r.robe);
-    if(k > 0.07){
+    camelRear(sx, sy, k, r.robe);
+    if(k > 0.20){
       cx.fillStyle='rgba(255,244,220,.92)';
-      cx.font=`${Math.min(20, 10+k*16)}px system-ui`; cx.textAlign='center';
-      cx.fillText(r.name, sx, sy - 135*k);
+      cx.font=`${Math.min(22, 11+k*5)}px system-ui`; cx.textAlign='center';
+      cx.fillText(r.name, sx, sy - CAMEL_UNITS*k - 8);
     }
     cx.restore();
   }
@@ -1386,10 +1525,10 @@ function frame(ts){
   cx.fillStyle = hz; cx.fillRect(0, horizonY-34, Wd, 64);
 
   /* --- the hunt --- */
-  if(!quarry && progress > 0.18 && progress < 0.30) spawnQuarry();
+  if(!quarry && progress > 0.14 && progress < 0.26) spawnQuarry();
   const hunting = !!(quarry && quarry.alive && !hunted);
-  YAW_MAX   = hunting ? 1.35 : 0.75;      /* ±77° while hunting, ±43° otherwise */
-  PITCH_MAX = hunting ? 0.55 : 0.22;
+  YAW_MAX   = hunting ? 1.75 : 1.30;      /* ±100° hunting, ±74° otherwise */
+  PITCH_MAX = hunting ? 0.80 : 0.45;
   if(quarry){
     quarryStep(dt, ts);
     arrowsStep(dt);
@@ -1413,9 +1552,13 @@ function frame(ts){
 
   povCamel(ts, playerX*6);
 
+  const gritNow = lerp(Wbase.grit, W.grit, Wblend || (W===Wbase?0:1));
   if(W.rain) drawRain(ts);
-  drawGrit(ts, lerp(Wbase.grit, W.grit, Wblend || (W===Wbase?0:1)));
+  drawSheets(ts, Math.max(0, gritNow-0.25), W===WEATHER.rain
+             ? 'rgba(150,168,176,1)' : 'rgba(214,178,120,1)');
+  drawGrit(ts, gritNow);
   if(W.tint){ cx.fillStyle=W.tint; cx.fillRect(0,0,Wd,Ht); }
+  drawVignette(Math.min(1, gritNow*0.8 + (W===WEATHER.night ? 0.5 : 0.15)));
 
   const label = document.getElementById('weather');
   const wname = WEATHER[at.name].fa;
@@ -1434,9 +1577,7 @@ function frame(ts){
       [FROM ? 'از ' + FROM : '', q].filter(Boolean).join(' · ');
     document.getElementById('done').style.display='flex';
     document.getElementById('skip').style.display='none';
-    return;
   }
-  requestAnimationFrame(frame);
 }
 
 loadTrip().then(()=>{
@@ -1444,7 +1585,8 @@ loadTrip().then(()=>{
   document.getElementById('dest').textContent  = (FROM ? FROM + ' ← ' : '') + TITLE;
   seed = hash(DEST); rnd = mulberry(seed);
   pickWeather(); currentWeather(0);
-  buildTrack(); seedRiders(); resize(); buildGrain(); updateQuiver();
+  buildTrack(); seedRiders(); resize(); updateQuiver();
+  if(Wd && Ht) buildGrain();
   const sp = document.getElementById('signpost');
   sp.textContent = 'به سوی ' + TITLE;
   sp.style.opacity = 1;
