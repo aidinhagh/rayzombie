@@ -923,8 +923,9 @@ PAGE = 8                    # destinations per keyboard page
 # 2022, so +03:30 holds all year and a fixed offset is safe.
 TEHRAN = dt.timezone(dt.timedelta(hours=3, minutes=30))
 DEADLINE_HOUR = 20
-ROLL_EMOJI = "🎯"           # darts: same 1-6, nicer throw
-DICE_PAUSE = 4.2            # let the dice animation land before answering
+DART_EMOJI = "🎯"
+DICE_EMOJI = "🎲"
+DICE_PAUSE = 4.2            # let the Telegram randomizer animation land
 
 # token -> {chat_id, user_id, name, origin, roll, options, page}
 _journeys: dict[str, dict] = {}
@@ -1038,14 +1039,19 @@ async def ride_button(bot, token: str, base: str | None):
 
 
 async def report_roll(bot, chat_id: int, label: str, real: str,
-                      origin: str | None, roll: int | None) -> None:
-    """Tell the admin about the throw itself, not just where they end up."""
+                      origin: str | None, dart_roll: int,
+                      dice_roll: int | None) -> None:
+    """Tell the admin about the dart and, after the first trip, the dice."""
     target = await admin_id(bot)
     if not target:
         return
     where = worldmap.name_of(origin) if origin else "—"
     line = (f"🎯 <b>{label}</b> ({real})\n"
-            f"از {where} · تاس {fa_num(roll) if roll else 'اولین سفر'}")
+            f"از {where} · دارت {fa_num(dart_roll)}")
+    if dice_roll is None:
+        line += " · اولین سفر"
+    else:
+        line += f" · تاس {fa_num(dice_roll)}"
     try:
         await bot.send_message(target, line, parse_mode="HTML")
     except Exception as exc:
@@ -1124,13 +1130,27 @@ async def travel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     origin = await asyncio.to_thread(roster.get_place, chat_id, user.id)
 
     adj = await chat_graph(chat_id)
+
+    # Every /travel throws a dart, including the very first trip.
+    dart_sent = await context.bot.send_dice(
+        message.chat_id, emoji=DART_EMOJI,
+        reply_to_message_id=message.message_id
+    )
+    dart_roll = dart_sent.dice.value
+
     if origin is None:
-        options, roll = list(worldmap.IDS), None
+        # First trip: dart only. Starting location is still a free choice.
+        roll = None
+        await asyncio.sleep(DICE_PAUSE)
+        options = list(worldmap.IDS)
         head = (f"🗺 <b>{name}</b> هنوز جایی نیست.\n"
                 f"برای شروع هر جای نقشه را می‌توانی انتخاب کنی:")
     else:
-        sent = await context.bot.send_dice(message.chat_id, emoji=ROLL_EMOJI,
-                                           reply_to_message_id=message.message_id)
+        # Later trips: dart + normal dice. Only the dice controls travel range.
+        sent = await context.bot.send_dice(
+            message.chat_id, emoji=DICE_EMOJI,
+            reply_to_message_id=message.message_id
+        )
         roll = sent.dice.value
         await asyncio.sleep(DICE_PAUSE)
         options = worldmap.reachable(origin, roll, exact=EXACT_STEPS, adj=adj)
@@ -1139,7 +1159,7 @@ async def travel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         head = (f"🎲 <b>{name}</b> عدد {fa_num(roll)} آورد.\n"
                 f"از <b>{worldmap.describe(origin)}</b> می‌توانی بروی به:")
 
-    await report_roll(context.bot, chat_id, name, real, origin, roll)
+    await report_roll(context.bot, chat_id, name, real, origin, dart_roll, roll)
 
     options = await visible_options(context.bot, chat_id, user.id, origin, options)
     if not options:
