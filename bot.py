@@ -506,13 +506,23 @@ ANONYMOUS_ADMIN_ID = 1087968824      # @GroupAnonymousBot
 
 
 async def is_admin(bot, chat_id: int, user_id: int) -> bool:
-    """The bot's admin, or the group's owner. Works in a private chat too,
-    which is the whole point of being able to fix things from the bot's DM."""
-    if user_id and user_id == await admin_id(bot):
-        return True
-    if chat_id and chat_id < 0:
-        return await is_owner(bot, chat_id, user_id)
-    return False
+    """Strictly the bot's admin. Being a group's owner is NOT enough.
+
+    The owner fallback was a mistake: every group has an owner, anyone can make
+    a group and add the bot, and in a private chat the check was resolved
+    against whichever group the person happened to play in. Admin commands
+    answer to one identity now — ADMIN_IDS if set, otherwise the account behind
+    ADMIN_HANDLE — and nothing else.
+    """
+    if not user_id:
+        return False
+    if ADMIN_IDS:
+        allowed = user_id in ADMIN_IDS
+    else:
+        allowed = user_id == await admin_id(bot)
+    if not allowed:
+        log.info("admin command refused for %s in %s", user_id, chat_id)
+    return allowed
 
 
 async def is_owner(bot, chat_id: int, user_id: int) -> bool:
@@ -550,8 +560,8 @@ async def delete_vote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "لطفاً حالت ناشناس (Remain Anonymous) را موقتاً خاموش کن."
         )
         return
-    if not sender or not await is_owner(context.bot, chat_id, sender.id):
-        await message.reply_text("فقط مالک گروه می‌تواند رأی حذف کند. ⛔️")
+    if not sender or not await is_admin(context.bot, chat_id, sender.id):
+        await message.reply_text("فقط مدیر می‌تواند رأی حذف کند. ⛔️")
         return
 
     query = " ".join(context.args or [])
@@ -822,8 +832,8 @@ async def set_roles(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await message.reply_text(f"اجازهٔ {label}: " + "، ".join(names))
         return
 
-    if not await is_owner(context.bot, chat_id, message.from_user.id):
-        await message.reply_text("فقط مالک گروه می‌تواند این را تنظیم کند. ⛔️")
+    if not await is_admin(context.bot, chat_id, message.from_user.id):
+        await message.reply_text("فقط مدیر می‌تواند این را تنظیم کند. ⛔️")
         return
 
     if context.args[0].lower() in ("all", "همه"):
@@ -864,6 +874,11 @@ async def set_roles(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ================================================================ the journey
 
 ADMIN_HANDLE = os.environ.get("ADMIN_HANDLE", "Aidinhagh").lstrip("@")
+
+# Numeric ids are the authoritative list. A username has to be resolved through
+# Telegram and cached, and anything that depends on a lookup can fail open if
+# the lookup misbehaves — an id cannot. Set ADMIN_IDS=123,456 and be certain.
+ADMIN_IDS = {int(x) for x in re.findall(r"\d+", os.environ.get("ADMIN_IDS", ""))}
 # BotFather → /newapp → short name. Needed because a web_app button only works
 # in private chats; a Direct Link Mini App opens from a group too.
 MINIAPP = os.environ.get("MINIAPP_SHORT_NAME", "").strip()
@@ -1759,6 +1774,22 @@ async def roadwork_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await message.reply_text(verdict)
 
 
+async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/whoami — your id, and whether the bot treats you as its admin."""
+    message = update.effective_message
+    user = message.from_user
+    chat_id = message.chat_id if message.chat_id < 0 else 0
+    ok = await is_admin(context.bot, chat_id, user.id)
+    resolved = await admin_id(context.bot)
+    await message.reply_text(
+        f"id: <code>{user.id}</code>\n"
+        f"@{user.username or '—'}\n"
+        f"مدیر: {'بله ✅' if ok else 'خیر'}\n"
+        f"ADMIN_IDS: {', '.join(str(i) for i in sorted(ADMIN_IDS)) or '—'}\n"
+        f"ADMIN_HANDLE: @{ADMIN_HANDLE} → {resolved or 'حل نشد'}",
+        parse_mode="HTML")
+
+
 async def show_map(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/map — the roads as they stand right now, closures included."""
     chat_id, _ = await board_for(update, context)
@@ -1813,6 +1844,7 @@ def main() -> None:
     app.add_handler(CommandHandler(["kill", "revive"], kill), group=1)
     app.add_handler(CommandHandler("dead", dead_list), group=1)
     app.add_handler(CommandHandler(["road", "roads"], roadwork_cmd), group=1)
+    app.add_handler(CommandHandler("whoami", whoami), group=1)
     app.add_handler(CallbackQueryHandler(on_travel_button, pattern=r"^t\|"),
                     group=1)
     app.add_handler(
@@ -1836,6 +1868,8 @@ def main() -> None:
     if problems:
         log.warning("map problems: %s", problems)
     log.info("mini app: %s", MINIAPP or "not set — rides open in the browser")
+    log.info("admin: %s", f"ids {sorted(ADMIN_IDS)}" if ADMIN_IDS
+             else f"@{ADMIN_HANDLE} (set ADMIN_IDS to be certain)")
     log.info("polling… version %s, db %s, %d seeded people, %d places",
              VERSION, roster.DB_PATH, len(seed.PEOPLE), len(worldmap.PLACES))
     # deliberately NOT Update.ALL_TYPES: message_reaction updates are noise
