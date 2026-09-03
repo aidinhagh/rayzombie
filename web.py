@@ -44,6 +44,7 @@ RIDE = RIDE_CANDIDATES[1]        # what we report when nothing is found
 
 _runner: aioweb.AppRunner | None = None
 bot = None                       # set by bot.py at boot, for hunt announcements
+admin_id_getter = None           # ditto, so hunt results reach the admin
 
 FA = {"lion": "شیر", "tiger": "ببر", "deer": "آهو", "zebra": "گورخر",
       "eagle": "عقاب"}
@@ -150,8 +151,8 @@ async def _hunt(request: aioweb.Request) -> aioweb.StreamResponse:
     await asyncio.to_thread(roster.save_hunt, token, chat_id, user_id, name,
                             animal, hit, shots)
 
+    fa = FA.get(animal, animal)
     if bot is not None and chat_id:
-        fa = FA.get(animal, animal)
         text = (f"🏹 <b>{name}</b> یک {fa} شکار کرد!"
                 if hit else
                 f"🏹 {fa} از دست <b>{name}</b> فرار کرد.")
@@ -159,6 +160,20 @@ async def _hunt(request: aioweb.Request) -> aioweb.StreamResponse:
             await bot.send_message(chat_id, text, parse_mode="HTML")
         except Exception as exc:
             log.info("hunt announcement failed: %s", exc)
+
+    # the admin gets the detail: who, what, and whether it landed
+    if bot is not None and admin_id_getter is not None:
+        try:
+            target = await admin_id_getter(bot)
+            if target:
+                await bot.send_message(
+                    target,
+                    f"🏹 <b>{name}</b>\n"
+                    f"شکار: {fa} · {'موفق ✅' if hit else 'ناموفق ❌'}\n"
+                    f"تیر مصرفی: {shots} · مقصد: {trip.get('title','?')}",
+                    parse_mode="HTML")
+        except Exception as exc:
+            log.info("hunt admin report failed: %s", exc)
 
     return aioweb.json_response({"ok": True})
 

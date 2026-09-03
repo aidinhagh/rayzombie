@@ -32,7 +32,11 @@ PEOPLE: list[tuple[str, list[str], bool]] = [
     ("farazfe",               ["فراز", "faraz"], False),
     ("527341236",             ["داریوش", "dariush"], False),
     ("109009789",             ["سیاوش", "siavash"], False),
-    ("aidinhagh",             ["آیدین", "ایدین", "aidin", "aydin"], True),
+    ("Miss_BME",               ["میس", "زهرا", "miss", "zahra"], False),
+       ("MiladShah1990",         ["milad", "میلاد"], False),
+    ("aryakowsary",           ["اعلیحضرت", "سماق", "سماخ", "somagh","آریا"], False),
+    ("Farid_B",                ["بز", "فرید", "farid"], False),
+    ("M0hammadHK",            ["ممد حکیمی", "حکیمی", "hakimi", "mohamad hakimi"], False)
 ]
 
 

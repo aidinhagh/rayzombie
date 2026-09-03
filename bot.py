@@ -17,7 +17,9 @@ import io
 import logging
 import os
 import re
+import datetime as dt
 import json
+import random
 import secrets
 import time
 from collections import OrderedDict
@@ -329,6 +331,9 @@ async def on_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     chat_id = message.chat_id
     voter = message.from_user.id if message.from_user else 0
+    if voter and await asyncio.to_thread(roster.is_dead, chat_id, voter):
+        await message.reply_text("مرده‌ها رأی نمی‌دهند. ⚰️")
+        return
     now = time.monotonic()
     if now - _last_user.get((chat_id, voter), 0.0) < USER_COOLDOWN:
         return
@@ -340,6 +345,12 @@ async def on_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     try:
         await seed_admins(context.bot, chat_id)
         target, score = await resolve_target(message, query)
+
+        if target and target.user_id and await asyncio.to_thread(
+                roster.is_dead, chat_id, target.user_id):
+            label = seed.display_for(target) or target.display
+            await message.reply_text(f"«{label}» از بازی خارج شده. ⚰️")
+            return
 
         photo = None
         immune = False
@@ -423,8 +434,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/duel — مبارزه: حمله / دفاع / حیله\n"
         "/travel — سفر روی نقشه\n"
         "/hunts — جدول شکار\n"
+        "تا ساعت ۲۰ به وقت تهران وقت داری؛ بعدش قرعه می‌افتد.\n"
         "/delete — فقط مالک گروه: حذف رأی\n\n"
-        "اسم فارسی یا انگلیسی، کوتاه‌شده یا یوزرنیم — پیدا می‌کنم. 🗳️"
+        "اسم فارسی یا انگلیسی، کوتاه‌شده یا یوزرنیم — پیدا می‌کنم. 🗳️\n"
+        "/help — همهٔ دستورها"
     )
 
 
@@ -490,6 +503,16 @@ async def photo_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 ANONYMOUS_ADMIN_ID = 1087968824      # @GroupAnonymousBot
+
+
+async def is_admin(bot, chat_id: int, user_id: int) -> bool:
+    """The bot's admin, or the group's owner. Works in a private chat too,
+    which is the whole point of being able to fix things from the bot's DM."""
+    if user_id and user_id == await admin_id(bot):
+        return True
+    if chat_id and chat_id < 0:
+        return await is_owner(bot, chat_id, user_id)
+    return False
 
 
 async def is_owner(bot, chat_id: int, user_id: int) -> bool:
@@ -629,6 +652,15 @@ async def may(chat_id: int, user_id: int, key: str) -> bool:
 
 def display_name(user) -> str:
     return (user.first_name or user.username or str(user.id))[:16]
+
+
+async def game_name(chat_id: int, user_id: int, fallback: str) -> str:
+    """What everyone sees in the game: the nickname if one is set.
+
+    Real names only ever appear in /rollcall, which is admin-only.
+    """
+    nick = await asyncio.to_thread(roster.get_nick, chat_id, user_id)
+    return nick or fallback
 
 
 def _expire() -> None:
@@ -853,6 +885,12 @@ def pick_quarry() -> str:
             return animal
     return "deer"
 PAGE = 8                    # destinations per keyboard page
+
+# Everyone has until 20:00 Tehran to pick. Iran dropped daylight saving in
+# 2022, so +03:30 holds all year and a fixed offset is safe.
+TEHRAN = dt.timezone(dt.timedelta(hours=3, minutes=30))
+DEADLINE_HOUR = 20
+ROLL_EMOJI = "🎯"           # darts: same 1-6, nicer throw
 DICE_PAUSE = 4.2            # let the dice animation land before answering
 
 # token -> {chat_id, user_id, name, origin, roll, options, page}
@@ -966,6 +1004,21 @@ async def ride_button(bot, token: str, base: str | None):
     return None
 
 
+async def report_roll(bot, chat_id: int, label: str, real: str,
+                      origin: str | None, roll: int | None) -> None:
+    """Tell the admin about the throw itself, not just where they end up."""
+    target = await admin_id(bot)
+    if not target:
+        return
+    where = worldmap.name_of(origin) if origin else "—"
+    line = (f"🎯 <b>{label}</b> ({real})\n"
+            f"از {where} · تاس {fa_num(roll) if roll else 'اولین سفر'}")
+    try:
+        await bot.send_message(target, line, parse_mode="HTML")
+    except Exception as exc:
+        log.info("roll report failed: %s", exc)
+
+
 def destination_keyboard(token: str, options: list[str], page: int,
                          ride_url: str | None = None) -> InlineKeyboardMarkup:
     pages = max(1, (len(options) + PAGE - 1) // PAGE)
@@ -984,6 +1037,29 @@ def destination_keyboard(token: str, options: list[str], page: int,
     return InlineKeyboardMarkup(rows)
 
 
+async def chat_graph(chat_id: int):
+    closed, extra = await asyncio.to_thread(roster.roadwork, chat_id)
+    return worldmap.build_graph(closed, extra)
+
+
+async def visible_options(bot, chat_id: int, user_id: int, origin: str | None,
+                          options: list[str]) -> list[str]:
+    """Strip out anywhere this player has not earned the right to see.
+
+    The silo is never offered, never listed and never mentioned — the only way
+    to find it is to have taken an eagle and then stand in the cemetery.
+    """
+    allowed = []
+    earned = await asyncio.to_thread(roster.has_killed, chat_id, user_id, "eagle")
+    for pid in options:
+        if pid in worldmap.SECRET:
+            continue
+        allowed.append(pid)
+    if earned and origin == "baqi" and "missile_silo" not in allowed:
+        allowed.append("missile_silo")          # any roll will do, from there
+    return allowed
+
+
 async def travel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/travel — first trip is a free choice; after that, roll for range."""
     message = update.effective_message
@@ -992,28 +1068,55 @@ async def travel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     user = message.from_user
-    name = display_name(user)
+
+    if await asyncio.to_thread(roster.is_dead, chat_id, user.id):
+        await message.reply_text("تو از بازی خارج شده‌ای. ⚰️")
+        return
+    if past_deadline():
+        await message.reply_text(
+            f"مهلت امروز تمام شد (ساعت {fa_num(DEADLINE_HOUR)} تهران).\n"
+            f"{time_until_open()} دیگر دوباره باز می‌شود."
+        )
+        return
+    if await asyncio.to_thread(roster.last_move, chat_id, user.id) >= day_start():
+        here = await asyncio.to_thread(roster.get_place, chat_id, user.id)
+        await message.reply_text(
+            f"امروز جابه‌جا شدی — {worldmap.describe(here) if here else ''}\n"
+            f"روزی یک بار. {time_until_open()} دیگر دوباره می‌توانی."
+        )
+        return
+
+    real = display_name(user)
+    name = await game_name(chat_id, user.id, real)
     origin = await asyncio.to_thread(roster.get_place, chat_id, user.id)
 
+    adj = await chat_graph(chat_id)
     if origin is None:
         options, roll = list(worldmap.IDS), None
         head = (f"🗺 <b>{name}</b> هنوز جایی نیست.\n"
                 f"برای شروع هر جای نقشه را می‌توانی انتخاب کنی:")
     else:
-        sent = await context.bot.send_dice(message.chat_id, emoji="🎲",
+        sent = await context.bot.send_dice(message.chat_id, emoji=ROLL_EMOJI,
                                            reply_to_message_id=message.message_id)
         roll = sent.dice.value
         await asyncio.sleep(DICE_PAUSE)
-        options = worldmap.reachable(origin, roll, exact=EXACT_STEPS)
+        options = worldmap.reachable(origin, roll, exact=EXACT_STEPS, adj=adj)
         if not options:
-            options = worldmap.reachable(origin, roll, exact=False)
+            options = worldmap.reachable(origin, roll, exact=False, adj=adj)
         head = (f"🎲 <b>{name}</b> عدد {fa_num(roll)} آورد.\n"
                 f"از <b>{worldmap.describe(origin)}</b> می‌توانی بروی به:")
 
+    await report_roll(context.bot, chat_id, name, real, origin, roll)
+
+    options = await visible_options(context.bot, chat_id, user.id, origin, options)
+    if not options:
+        await message.reply_text("از اینجا راهی باز نیست. 🚧")
+        return
+
     token = secrets.token_urlsafe(6)
     _journeys[token] = {"chat_id": chat_id, "user_id": user.id, "name": name,
-                        "origin": origin, "roll": roll, "options": options,
-                        "born": time.time()}
+                        "real": real, "origin": origin, "roll": roll,
+                        "options": options, "born": time.time()}
     await message.reply_text(head, parse_mode="HTML",
                              reply_markup=destination_keyboard(token, options, 0))
 
@@ -1060,11 +1163,19 @@ async def on_travel_button(update: Update,
     _journeys.pop(token, None)
     chat_id, user_id, name = trip["chat_id"], trip["user_id"], trip["name"]
     origin, roll = trip["origin"], trip["roll"]
+    real = trip.get("real") or name
 
-    await asyncio.to_thread(roster.set_place, chat_id, user_id, name, arg)
-    await asyncio.to_thread(roster.log_travel, chat_id, user_id, name, arg,
+    # keep the real name in the record: the nickname is a display layer, and
+    # writing it into players.name wiped the only copy of who this actually is
+    await asyncio.to_thread(roster.set_place, chat_id, user_id, real, arg)
+    await asyncio.to_thread(roster.log_travel, chat_id, user_id, real, arg,
                             origin, roll)
     others = await asyncio.to_thread(roster.others_at, chat_id, arg, user_id, 3)
+    nicks = await asyncio.to_thread(roster.all_nicks, chat_id)
+    if nicks:
+        rows = await asyncio.to_thread(roster.all_players, chat_id)
+        by_name = {r[1]: r[0] for r in rows}
+        others = [nicks.get(by_name.get(n), n) for n in others]
 
     await query.answer(f"راهیِ {worldmap.name_of(arg)} شدی 🐫")
 
@@ -1114,30 +1225,39 @@ async def where(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         place = await asyncio.to_thread(roster.get_place, chat_id,
                                         target.user_id)
-        label = seed.display_for(target) or target.display
+        label = await game_name(chat_id, target.user_id,
+                                seed.display_for(target) or target.display)
+        where = "نامعلوم" if place in worldmap.SECRET else worldmap.describe(place)
         await message.reply_text(
-            f"{label}: {worldmap.describe(place)}" if place
-            else f"{label} هنوز وارد نقشه نشده."
+            f"{label}: {where}" if place else f"{label} هنوز وارد نقشه نشده."
         )
         return
 
     rows = await asyncio.to_thread(roster.all_players, chat_id)
+    gone = await asyncio.to_thread(roster.dead_ids, chat_id)
+    nicks = await asyncio.to_thread(roster.all_nicks, chat_id)
+    rows = [r for r in rows if r[0] not in gone]
     if not rows:
         await message.reply_text("هنوز کسی روی نقشه نیست.")
         return
     lines = ["🗺 <b>موقعیت‌ها</b>", ""]
-    for _uid, name, place, _ts in rows:
-        lines.append(f"• {name} — {worldmap.describe(place)}")
+    for uid, name, place, _ts in rows:
+        # a player standing in the silo shows as unknown: naming it publicly
+        # would give the secret away to everyone at once
+        where = "نامعلوم" if place in worldmap.SECRET else worldmap.describe(place)
+        lines.append(f"• {nicks.get(uid, name)} — {where}")
     await message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def set_location(update: Update,
                        context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/setloc <person> = <place> — owner only."""
+    """/setloc <person> = <place> — admin only, and works in the bot's DM."""
     message = update.effective_message
-    chat_id = message.chat_id
-    if not await is_owner(context.bot, chat_id, message.from_user.id):
-        await message.reply_text("فقط مالک گروه. ⛔️")
+    chat_id, _ = await board_for(update, context)
+    if chat_id is None:
+        return
+    if not await is_admin(context.bot, chat_id, message.from_user.id):
+        await message.reply_text("فقط مدیر. ⛔️")
         return
 
     raw = " ".join(context.args or [])
@@ -1161,16 +1281,19 @@ async def set_location(update: Update,
         return
     label = seed.display_for(target) or target.display
     await asyncio.to_thread(roster.set_place, chat_id, uid, label, place)
-    await message.reply_text(f"{label} → {worldmap.name_of(place)} ✅")
+    shown = await game_name(chat_id, uid, label)
+    await message.reply_text(f"{shown} → {worldmap.name_of(place)} ✅")
 
 
 async def clear_locations(update: Update,
                           context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/clearlocs [name|all] — owner only."""
+    """/clearlocs [name|all] — admin only, and works in the bot's DM."""
     message = update.effective_message
-    chat_id = message.chat_id
-    if not await is_owner(context.bot, chat_id, message.from_user.id):
-        await message.reply_text("فقط مالک گروه. ⛔️")
+    chat_id, _ = await board_for(update, context)
+    if chat_id is None:
+        return
+    if not await is_admin(context.bot, chat_id, message.from_user.id):
+        await message.reply_text("فقط مدیر. ⛔️")
         return
 
     arg = " ".join(context.args or []).strip()
@@ -1234,9 +1357,412 @@ async def hunts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
+async def resolve_person(bot, chat_id: int, text: str):
+    """Find someone by @username, numeric id, or name.
+
+    An id or a handle is exact, which matters for admin commands — you do not
+    want a fuzzy match deciding who just died.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None, None
+
+    if text.isdigit():
+        uid = int(text)
+        rows = await asyncio.to_thread(roster.all_players, chat_id)
+        for row_id, name, *_ in rows:
+            if row_id == uid:
+                return uid, name
+        people = await asyncio.to_thread(roster.members, chat_id)
+        for cand in people:
+            if cand.user_id == uid:
+                return uid, cand.display
+        return uid, str(uid)          # unseen, but the id is unambiguous
+
+    handle = text.lstrip("@")
+    if handle:
+        cached = await asyncio.to_thread(roster.known_handle, handle)
+        if cached:
+            people = await asyncio.to_thread(roster.members, chat_id)
+            for cand in people:
+                if cand.user_id == cached:
+                    return cached, cand.display
+            return cached, f"@{handle}"
+
+    target, _score = best_match(text, await chat_candidates(chat_id))
+    if not target:
+        return None, None
+    uid = await ensure_user_id(bot, target)
+    return (uid or None), (seed.display_for(target) or target.display)
+
+
+async def set_nick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/nick <person> = <nickname> — admin only. `/nick <person> =` clears it."""
+    message = update.effective_message
+    chat_id, _ = await board_for(update, context)
+    if chat_id is None:
+        return
+    if not await is_admin(context.bot, chat_id, message.from_user.id):
+        await message.reply_text("فقط مدیر. ⛔️")
+        return
+
+    raw = " ".join(context.args or [])
+    if "=" not in raw:
+        await message.reply_text("/nick <اسم> = <لقب>")
+        return
+    who, _, nick = raw.partition("=")
+    nick = nick.strip()[:20]
+
+    uid, real = await resolve_person(context.bot, chat_id, who)
+    if not uid:
+        await message.reply_text(
+            f"«{who.strip()}» پیدا نشد. با @یوزرنیم یا آی‌دی عددی هم می‌شود.")
+        return
+
+    await asyncio.to_thread(roster.set_nick, chat_id, uid, nick or None)
+    await message.reply_text(f"{real} → «{nick}» ✅" if nick
+                             else f"لقب {real} پاک شد.")
+
+
+async def rollcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/rollcall — real names, nicknames and positions. Admin only."""
+    message = update.effective_message
+    chat_id, _ = await board_for(update, context)
+    if chat_id is None:
+        return
+    if not await is_admin(context.bot, chat_id, message.from_user.id):
+        await message.reply_text("فقط مدیر. ⛔️")
+        return
+
+    rows = await asyncio.to_thread(roster.all_players, chat_id)
+    nicks = await asyncio.to_thread(roster.all_nicks, chat_id)
+    gone = await asyncio.to_thread(roster.dead_ids, chat_id)
+    rows = [r for r in rows if r[0] not in gone]
+    if not rows:
+        await message.reply_text("هنوز کسی روی نقشه نیست.")
+        return
+    lines = ["🗒 <b>اسامی واقعی</b>", ""]
+    for uid, name, place, _ts in rows:
+        nick = nicks.get(uid)
+        who = f"{name} ({nick})" if nick else name
+        lines.append(f"• {who} — {worldmap.describe(place)}")
+    await message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def board(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/board — nicknames and positions only. Admin only, but safe to forward."""
+    message = update.effective_message
+    chat_id, _ = await board_for(update, context)
+    if chat_id is None:
+        return
+    if not await is_admin(context.bot, chat_id, message.from_user.id):
+        await message.reply_text("فقط مدیر. ⛔️")
+        return
+
+    rows = await asyncio.to_thread(roster.all_players, chat_id)
+    nicks = await asyncio.to_thread(roster.all_nicks, chat_id)
+    gone = await asyncio.to_thread(roster.dead_ids, chat_id)
+    rows = [r for r in rows if r[0] not in gone]
+    if not rows:
+        await message.reply_text("هنوز کسی روی نقشه نیست.")
+        return
+    lines = ["🗺 <b>موقعیت‌ها</b>", ""]
+    for uid, name, place, _ts in rows:
+        lines.append(f"• {nicks.get(uid, '؟')} — {worldmap.describe(place)}")
+    unnamed = [uid for uid, *_ in rows if uid not in nicks]
+    if unnamed:
+        lines.append(f"\n({fa_num(len(unnamed))} نفر هنوز لقب ندارند)")
+    await message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+def day_start(now: dt.datetime | None = None) -> float:
+    """Midnight Tehran of the current day.
+
+    A round is a calendar day: you may move once, any time between 00:00 and
+    20:00. Anyone whose last move predates this has not chosen today.
+    """
+    now = now or dt.datetime.now(TEHRAN)
+    return now.replace(hour=0, minute=0, second=0,
+                       microsecond=0).timestamp()
+
+
+def past_deadline(now: dt.datetime | None = None) -> bool:
+    now = now or dt.datetime.now(TEHRAN)
+    return now.hour >= DEADLINE_HOUR
+
+
+def time_until_open(now: dt.datetime | None = None) -> str:
+    """How long until the window opens again, in Persian."""
+    now = now or dt.datetime.now(TEHRAN)
+    nxt = (now + dt.timedelta(days=1)).replace(hour=0, minute=0, second=0,
+                                               microsecond=0)
+    left = nxt - now
+    hours = int(left.total_seconds() // 3600)
+    mins = int((left.total_seconds() % 3600) // 60)
+    if hours:
+        return f"{fa_num(hours)} ساعت و {fa_num(mins)} دقیقه"
+    return f"{fa_num(mins)} دقیقه"
+
+
+async def assign_missing(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """20:00 Tehran: anyone who has not chosen gets sent somewhere at random.
+
+    A player with a position is moved somewhere a dice roll could have taken
+    them, so an automatic move obeys the same rules as a chosen one. A player
+    with no position at all is simply dropped anywhere on the map, exactly like
+    a first turn.
+    """
+    since = day_start()                  # anyone who has not moved today
+    for chat_id in await asyncio.to_thread(roster.known_chats):
+        try:
+            stale = await asyncio.to_thread(roster.stale_players, chat_id, since)
+        except Exception:
+            continue
+        if not stale:
+            continue
+
+        nicks = await asyncio.to_thread(roster.all_nicks, chat_id)
+        gone = await asyncio.to_thread(roster.dead_ids, chat_id)
+        adj = await chat_graph(chat_id)
+        moved = []
+        for user_id, name, place in stale:
+            if user_id in gone:
+                continue
+            if place:
+                roll = secrets.randbelow(6) + 1
+                options = worldmap.reachable(place, roll, exact=EXACT_STEPS,
+                                             adj=adj) \
+                    or worldmap.reachable(place, roll, exact=False, adj=adj)
+            else:
+                roll, options = None, list(worldmap.IDS)
+            options = [p for p in options if p not in worldmap.SECRET]
+            if not options:
+                continue
+            dest = random.choice(options)
+            label = nicks.get(user_id, name)
+            await asyncio.to_thread(roster.set_place, chat_id, user_id, name, dest)
+            await asyncio.to_thread(roster.log_travel, chat_id, user_id, name,
+                                    dest, place, roll)
+            moved.append((label, place, dest, roll))
+            await report_to_admin(context.bot, str(chat_id), label, place, dest, roll)
+
+        if not moved:
+            continue
+        lines = ["⏰ <b>مهلت تمام شد</b>", "برای این افراد قرعه انداختم:", ""]
+        for label, origin, dest, roll in moved[:25]:
+            piece = f"• {label} → {worldmap.describe(dest)}"
+            if roll:
+                piece += f" (تاس {fa_num(roll)})"
+            lines.append(piece)
+        try:
+            await context.bot.send_message(chat_id, "\n".join(lines),
+                                           parse_mode="HTML")
+        except Exception as exc:
+            log.info("deadline announcement failed in %s: %s", chat_id, exc)
+
+
+async def deadline_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/draw — run the 20:00 draw immediately. Admin only, for testing."""
+    message = update.effective_message
+    chat_id, _ = await board_for(update, context)
+    if chat_id is None:
+        return
+    if not await is_admin(context.bot, chat_id, message.from_user.id):
+        await message.reply_text("فقط مدیر. ⛔️")
+        return
+    await assign_missing(context)
+    await message.reply_text("قرعه انجام شد.")
+
+
+async def kill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/kill <person> — out of the game. /revive brings them back."""
+    message = update.effective_message
+    chat_id, _ = await board_for(update, context)
+    if chat_id is None:
+        return
+    if not await is_admin(context.bot, chat_id, message.from_user.id):
+        await message.reply_text("فقط مدیر. ⛔️")
+        return
+
+    arg = " ".join(context.args or [])
+    if message.reply_to_message and not arg:
+        uid = message.reply_to_message.from_user.id
+        real = display_name(message.reply_to_message.from_user)
+    else:
+        uid, real = await resolve_person(context.bot, chat_id, arg)
+    if not uid:
+        await message.reply_text("/kill <اسم یا @یوزرنیم یا آی‌دی>")
+        return
+
+    reviving = (message.text or "").lstrip("/").startswith("revive")
+    await asyncio.to_thread(roster.set_dead, chat_id, uid, not reviving)
+    shown = await game_name(chat_id, uid, real)
+    await message.reply_text(f"{shown} برگشت به بازی. ✅" if reviving
+                             else f"{shown} از بازی خارج شد. ⚰️")
+
+
+async def dead_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/dead — who is out. Admin only."""
+    message = update.effective_message
+    chat_id, _ = await board_for(update, context)
+    if chat_id is None:
+        return
+    if not await is_admin(context.bot, chat_id, message.from_user.id):
+        await message.reply_text("فقط مدیر. ⛔️")
+        return
+
+    gone = await asyncio.to_thread(roster.dead_ids, chat_id)
+    if not gone:
+        await message.reply_text("همه زنده‌اند.")
+        return
+    rows = {r[0]: r[1] for r in await asyncio.to_thread(roster.all_players, chat_id)}
+    nicks = await asyncio.to_thread(roster.all_nicks, chat_id)
+    lines = ["⚰️ <b>خارج‌شده‌ها</b>", ""]
+    for uid in gone:
+        name = rows.get(uid, str(uid))
+        nick = nicks.get(uid)
+        lines.append(f"• {name}" + (f" ({nick})" if nick else ""))
+    await message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+PUBLIC_HELP = """📖 <b>راهنما</b>
+
+<b>رأی</b>
+#رای ممد — رأی به یک نفر (روزی یک رأی)
+#رایگیری — نتیجهٔ ۲۴ ساعت گذشته
+
+<b>سفر روی نقشه</b>
+/travel — تاس بینداز و جابه‌جا شو
+  · روزی فقط یک بار، از ۰۰:۰۰ تا {deadline}:۰۰ به وقت تهران
+  · بعد از {deadline} قرعه می‌افتد و جای کسانی که انتخاب نکرده‌اند تصادفی تعیین می‌شود
+  · اولین سفرت هر جای نقشه می‌تواند باشد؛ بعد از آن تاس تعیین می‌کند تا کجا
+/where — موقعیت همه · /where ممد — موقعیت یک نفر
+/map — همهٔ مکان‌ها و جاده‌ها
+
+<b>مبارزه</b>
+/duel — چالش حمله / دفاع / حیله
+  · حمله ← حیله، دفاع ← حمله، حیله ← دفاع
+  · حرکت اول مخفی می‌ماند تا حریف انتخاب کند
+/duel ممد یا ریپلای — چالش به یک نفر مشخص
+
+<b>شکار</b>
+هر سفر یک حیوان سر راهت هست. با کمان بزنش.
+/hunts — جدول شکار هفته
+
+<b>بقیه</b>
+/whois ممد — تست تشخیص اسم
+/photo — چرا عکس پروفایل نمی‌آید
+/ping /webcheck — وضعیت ربات"""
+
+ADMIN_HELP = """
+
+🔑 <b>فقط مدیر</b>
+/nick ممد = زامبی — لقب (با @یوزرنیم یا آی‌دی عددی هم می‌شود)
+/rollcall — اسم واقعی + لقب + موقعیت
+/board — فقط لقب + موقعیت
+/setloc ممد = کعبه — جابه‌جایی دستی
+/clearlocs ممد | all — پاک کردن موقعیت
+/kill ممد — خارج از بازی (نه رأی می‌دهد، نه رأی می‌گیرد، نه سفر)
+/revive ممد — برگرداندن · /dead — لیست خارج‌شده‌ها
+/draw — اجرای فوری قرعهٔ {deadline}
+/delete ممد | all — حذف رأی
+/challengers · /responders — اجازهٔ مبارزه
+/road خراب کعبه - واحه ۸ — خراب کردن جاده
+/road بساز A - B · /road بازگردان A - B · /road لیست
+همهٔ این‌ها در پیوی ربات هم کار می‌کنند."""
+
+
+async def help_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/help — everything the bot does, with the admin half only for admins."""
+    message = update.effective_message
+    text = PUBLIC_HELP.replace("{deadline}", fa_num(DEADLINE_HOUR))
+    chat_id, _ = (message.chat_id, None) if message.chat.type in (
+        ChatType.GROUP, ChatType.SUPERGROUP) else (None, None)
+    try:
+        if await is_admin(context.bot, chat_id or 0, message.from_user.id):
+            text += ADMIN_HELP.replace("{deadline}", fa_num(DEADLINE_HOUR))
+    except Exception:
+        pass
+    await message.reply_text(text, parse_mode="HTML")
+
+
+ROAD_SPLIT = re.compile(r"\s*(?:[-–—]|تا|به)\s*")
+
+
+async def roadwork_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/road خراب کعبه - واحه ۸   ·   /road بساز A - B   ·   /road لیست
+
+    Destroying a road removes it for everyone; building one adds a road the
+    original map never had. Both persist and both are admin only.
+    """
+    message = update.effective_message
+    chat_id, _ = await board_for(update, context)
+    if chat_id is None:
+        return
+    if not await is_admin(context.bot, chat_id, message.from_user.id):
+        await message.reply_text("فقط مدیر. ⛔️")
+        return
+
+    args = list(context.args or [])
+    verb = (args[0].lower() if args else "")
+    rest = " ".join(args[1:])
+
+    if verb in ("list", "لیست", ""):
+        closed, extra = await asyncio.to_thread(roster.roadwork, chat_id)
+        if not closed and not extra:
+            await message.reply_text(
+                "همهٔ جاده‌ها سالم‌اند.\n"
+                "/road خراب <جا> - <جا>\n/road بساز <جا> - <جا>\n"
+                "/road بازگردان <جا> - <جا>")
+            return
+        lines = []
+        for a, b in closed:
+            lines.append(f"🚧 {worldmap.name_of(a)} — {worldmap.name_of(b)}")
+        for a, b in extra:
+            lines.append(f"🛤 {worldmap.name_of(a)} — {worldmap.name_of(b)} (جدید)")
+        await message.reply_text("\n".join(lines))
+        return
+
+    parts = [p for p in ROAD_SPLIT.split(rest) if p.strip()]
+    if len(parts) != 2:
+        await message.reply_text("دو مکان لازم است: /road خراب کعبه - واحه ۸")
+        return
+    a = worldmap.find(parts[0].strip())
+    b = worldmap.find(parts[1].strip())
+    if not a or not b:
+        bad = parts[0] if not a else parts[1]
+        await message.reply_text(f"مکانی به اسم «{bad.strip()}» نداریم.")
+        return
+    if a == b:
+        await message.reply_text("یک مکان به خودش جاده ندارد.")
+        return
+
+    if verb in ("خراب", "destroy", "close", "ببند"):
+        await asyncio.to_thread(roster.set_road, chat_id, a, b, "closed")
+        verdict = f"🚧 جادهٔ {worldmap.name_of(a)} — {worldmap.name_of(b)} خراب شد."
+    elif verb in ("بساز", "build", "open", "بازکن"):
+        await asyncio.to_thread(roster.set_road, chat_id, a, b, "open")
+        verdict = f"🛤 جادهٔ {worldmap.name_of(a)} — {worldmap.name_of(b)} ساخته شد."
+    elif verb in ("بازگردان", "reset", "revert"):
+        await asyncio.to_thread(roster.set_road, chat_id, a, b, None)
+        verdict = f"↩️ {worldmap.name_of(a)} — {worldmap.name_of(b)} به حالت اول برگشت."
+    else:
+        await message.reply_text("خراب / بساز / بازگردان / لیست")
+        return
+
+    adj = await chat_graph(chat_id)
+    stranded = [worldmap.name_of(p) for p in worldmap.IDS
+                if p not in worldmap.SECRET and not
+                [n for n in adj[p] if n not in worldmap.SECRET]]
+    if stranded:
+        verdict += "\n⚠️ حالا این جاها هیچ راهی ندارند: " + "، ".join(stranded)
+    await message.reply_text(verdict)
+
+
 async def show_map(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/map — what the bot believes the roads are, so it can be corrected."""
-    text = worldmap.summary()
+    """/map — the roads as they stand right now, closures included."""
+    chat_id, _ = await board_for(update, context)
+    text = worldmap.summary(await chat_graph(chat_id) if chat_id else None)
     for chunk in [text[i:i + 3500] for i in range(0, len(text), 3500)]:
         await update.effective_message.reply_text(chunk)
 
@@ -1261,7 +1787,9 @@ def main() -> None:
     app = Application.builder().token(TOKEN).post_init(_boot).build()
     fresh = filters.UpdateType.MESSAGE
     app.add_handler(MessageHandler(filters.ALL & fresh, track), group=0)
-    app.add_handler(CommandHandler(["start", "help"], start), group=1)
+    app.add_handler(CommandHandler("start", start), group=1)
+    app.add_handler(CommandHandler(["help", "commands", "rahnama"], help_all),
+                    group=1)
     app.add_handler(CommandHandler("whois", who), group=1)
     app.add_handler(CommandHandler("photo", photo_check), group=1)
     app.add_handler(CommandHandler(["result", "natije"], show_tally), group=1)
@@ -1278,13 +1806,32 @@ def main() -> None:
     app.add_handler(CommandHandler("map", show_map), group=1)
     app.add_handler(CommandHandler("webcheck", webcheck), group=1)
     app.add_handler(CommandHandler("hunts", hunts), group=1)
+    app.add_handler(CommandHandler("nick", set_nick), group=1)
+    app.add_handler(CommandHandler("rollcall", rollcall), group=1)
+    app.add_handler(CommandHandler("board", board), group=1)
+    app.add_handler(CommandHandler("draw", deadline_now), group=1)
+    app.add_handler(CommandHandler(["kill", "revive"], kill), group=1)
+    app.add_handler(CommandHandler("dead", dead_list), group=1)
+    app.add_handler(CommandHandler(["road", "roads"], roadwork_cmd), group=1)
     app.add_handler(CallbackQueryHandler(on_travel_button, pattern=r"^t\|"),
                     group=1)
     app.add_handler(
         MessageHandler((filters.TEXT | filters.CAPTION) & fresh, on_trigger),
         group=1,
     )
+    web.admin_id_getter = admin_id
     app.add_error_handler(on_error)
+
+    if app.job_queue:
+        app.job_queue.run_daily(
+            assign_missing,
+            time=dt.time(hour=DEADLINE_HOUR, minute=0, tzinfo=TEHRAN),
+            name="deadline",
+        )
+        log.info("nightly draw scheduled for %02d:00 Tehran", DEADLINE_HOUR)
+    else:
+        log.warning("no job queue — install python-telegram-bot[job-queue] or "
+                    "the 20:00 draw will never run")
     problems = worldmap.sanity()
     if problems:
         log.warning("map problems: %s", problems)

@@ -87,6 +87,25 @@ def _db() -> sqlite3.Connection:
                 payload TEXT,
                 ts      REAL
             );
+            CREATE TABLE IF NOT EXISTS roadwork (
+                chat_id INTEGER NOT NULL,
+                a       TEXT NOT NULL,
+                b       TEXT NOT NULL,
+                state   TEXT NOT NULL,       -- 'closed' or 'open'
+                PRIMARY KEY (chat_id, a, b)
+            );
+            CREATE TABLE IF NOT EXISTS dead (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                ts      REAL,
+                PRIMARY KEY (chat_id, user_id)
+            );
+            CREATE TABLE IF NOT EXISTS nicknames (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                nick    TEXT,
+                PRIMARY KEY (chat_id, user_id)
+            );
             CREATE TABLE IF NOT EXISTS hunts (
                 token   TEXT PRIMARY KEY,
                 chat_id INTEGER,
@@ -491,3 +510,142 @@ def hunt_tally(chat_id: int, window: float = 7*24*3600):
              ORDER BY 2 DESC, 3 ASC""",
             (chat_id, since),
         ).fetchall()
+
+
+# ----------------------------------------------------------------- nicknames
+
+def set_nick(chat_id: int, user_id: int, nick: str | None) -> None:
+    with _lock:
+        if nick:
+            _db().execute(
+                "INSERT INTO nicknames (chat_id, user_id, nick) VALUES (?,?,?)"
+                " ON CONFLICT(chat_id, user_id) DO UPDATE SET nick=excluded.nick",
+                (chat_id, user_id, nick),
+            )
+        else:
+            _db().execute("DELETE FROM nicknames WHERE chat_id=? AND user_id=?",
+                          (chat_id, user_id))
+        _db().commit()
+
+
+def get_nick(chat_id: int, user_id: int) -> str | None:
+    with _lock:
+        row = _db().execute(
+            "SELECT nick FROM nicknames WHERE chat_id=? AND user_id=?",
+            (chat_id, user_id),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def all_nicks(chat_id: int) -> dict[int, str]:
+    with _lock:
+        rows = _db().execute("SELECT user_id, nick FROM nicknames WHERE chat_id=?",
+                             (chat_id,)).fetchall()
+    return {uid: nick for uid, nick in rows if nick}
+
+
+# ------------------------------------------------- the nightly random draw
+
+def known_chats() -> list[int]:
+    """Every group the bot has records for."""
+    with _lock:
+        rows = _db().execute(
+            "SELECT DISTINCT chat_id FROM members WHERE chat_id < 0"
+            " UNION SELECT DISTINCT chat_id FROM players WHERE chat_id < 0"
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+def stale_players(chat_id: int, since: float) -> list[tuple[int, str, str | None]]:
+    """(user_id, name, place) for members who have not moved since `since`.
+
+    Includes people with no position at all — they have simply never played.
+    """
+    with _lock:
+        rows = _db().execute(
+            """SELECT m.user_id,
+                      COALESCE(p.name, m.first, m.username, m.user_id),
+                      p.place, p.updated
+                 FROM members m
+                 LEFT JOIN players p
+                   ON p.chat_id = m.chat_id AND p.user_id = m.user_id
+                WHERE m.chat_id = ?
+                  AND (p.updated IS NULL OR p.updated < ?)""",
+            (chat_id, since),
+        ).fetchall()
+    return [(r[0], str(r[1]), r[2]) for r in rows]
+
+
+# --------------------------------------------------------------- the fallen
+
+def set_dead(chat_id: int, user_id: int, dead: bool) -> None:
+    with _lock:
+        if dead:
+            _db().execute(
+                "INSERT OR REPLACE INTO dead (chat_id, user_id, ts) VALUES (?,?,?)",
+                (chat_id, user_id, time.time()),
+            )
+        else:
+            _db().execute("DELETE FROM dead WHERE chat_id=? AND user_id=?",
+                          (chat_id, user_id))
+        _db().commit()
+
+
+def is_dead(chat_id: int, user_id: int) -> bool:
+    with _lock:
+        return _db().execute("SELECT 1 FROM dead WHERE chat_id=? AND user_id=?",
+                             (chat_id, user_id)).fetchone() is not None
+
+
+def dead_ids(chat_id: int) -> set[int]:
+    with _lock:
+        rows = _db().execute("SELECT user_id FROM dead WHERE chat_id=?",
+                             (chat_id,)).fetchall()
+    return {r[0] for r in rows}
+
+
+def last_move(chat_id: int, user_id: int) -> float:
+    with _lock:
+        row = _db().execute(
+            "SELECT updated FROM players WHERE chat_id=? AND user_id=?",
+            (chat_id, user_id),
+        ).fetchone()
+    return (row[0] or 0.0) if row else 0.0
+
+
+# ------------------------------------------------------------- roads in play
+
+def set_road(chat_id: int, a: str, b: str, state: str | None) -> None:
+    """state 'closed' destroys it, 'open' builds one, None reverts to the map."""
+    a, b = sorted((a, b))
+    with _lock:
+        if state is None:
+            _db().execute("DELETE FROM roadwork WHERE chat_id=? AND a=? AND b=?",
+                          (chat_id, a, b))
+        else:
+            _db().execute(
+                "INSERT INTO roadwork (chat_id, a, b, state) VALUES (?,?,?,?)"
+                " ON CONFLICT(chat_id, a, b) DO UPDATE SET state=excluded.state",
+                (chat_id, a, b, state),
+            )
+        _db().commit()
+
+
+def roadwork(chat_id: int) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """(closed, extra) for this chat."""
+    with _lock:
+        rows = _db().execute(
+            "SELECT a, b, state FROM roadwork WHERE chat_id=?", (chat_id,)
+        ).fetchall()
+    closed = [(a, b) for a, b, st in rows if st == "closed"]
+    extra = [(a, b) for a, b, st in rows if st == "open"]
+    return closed, extra
+
+
+def has_killed(chat_id: int, user_id: int, animal: str) -> bool:
+    with _lock:
+        return _db().execute(
+            "SELECT 1 FROM hunts WHERE chat_id=? AND user_id=? AND animal=?"
+            " AND hit=1 LIMIT 1",
+            (chat_id, user_id, animal),
+        ).fetchone() is not None

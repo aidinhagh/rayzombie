@@ -53,7 +53,13 @@ PLACES: list[tuple[str, str, str, int, int]] = [
     ("oasis13", "واحهٔ ۱۳", "oasis", 518, 507),
     ("oasis14", "واحهٔ ۱۴", "oasis", 594, 434),
     ("oasis15", "واحهٔ ۱۵", "oasis", 838, 469),
+
+    # Not on the drawn map, not listed by /map, and not offered to anyone who
+    # has not earned it. South of the cemetery.
+    ("missile_silo", "سیلوی موشک", "silo", 605, 470),
 ]
+
+SECRET = {"missile_silo"}
 
 ROADS: list[tuple[str, str]] = [
     ("oasis1", "euphrates"),
@@ -108,6 +114,8 @@ ROADS: list[tuple[str, str]] = [
     ("oasis15", "medina_square"),
     ("oasis13", "oasis15"),
     ("oasis13", "medina_square"),
+
+    ("baqi", "missile_silo"),          # the way in, and the way back out
 ]
 
 NAME = {pid: name for pid, name, _, _, _ in PLACES}
@@ -125,7 +133,8 @@ def name_of(pid: str) -> str:
     return NAME.get(pid, pid)
 
 
-NAMED = [pid for pid, _, kind, _, _ in PLACES if kind != "oasis"]
+NAMED = [pid for pid, _, kind, _, _ in PLACES
+         if kind != "oasis" and pid not in SECRET]
 
 
 def landmarks_near(pid: str, want: int = 2) -> list[str]:
@@ -167,31 +176,51 @@ def short_describe(pid: str, limit: int = 60) -> str:
     return text if len(text) <= limit else name_of(pid)
 
 
-def distances_from(start: str) -> dict[str, int]:
+def build_graph(closed=(), extra=()) -> dict[str, set[str]]:
+    """The road network with a group's own changes applied.
+
+    Roads can be destroyed and rebuilt during play, so nothing may assume the
+    static ROADS list — every lookup takes the graph it should use.
+    """
+    adj = {pid: set(nbrs) for pid, nbrs in NEIGHBOURS.items()}
+    for a, b in extra:
+        if a in adj and b in adj:
+            adj[a].add(b)
+            adj[b].add(a)
+    for a, b in closed:
+        if a in adj and b in adj:
+            adj[a].discard(b)
+            adj[b].discard(a)
+    return adj
+
+
+def distances_from(start: str, adj=None) -> dict[str, int]:
     """Road-hops from `start` to everywhere reachable."""
+    adj = adj or NEIGHBOURS
     seen = {start: 0}
     queue = deque([start])
     while queue:
         here = queue.popleft()
-        for nxt in NEIGHBOURS.get(here, ()):
+        for nxt in adj.get(here, ()):
             if nxt not in seen:
                 seen[nxt] = seen[here] + 1
                 queue.append(nxt)
     return seen
 
 
-def reachable(start: str, steps: int, exact: bool = False) -> list[str]:
+def reachable(start: str, steps: int, exact: bool = False, adj=None) -> list[str]:
     """Where a roll of `steps` can take you.
 
     Default is "up to" — a 5 lets you stop anywhere within five roads. Set
     EXACT_STEPS in bot.py if you would rather a roll mean exactly that far.
     """
-    dist = distances_from(start)
+    adj = adj or NEIGHBOURS
+    dist = distances_from(start, adj)
     out = [pid for pid, d in dist.items()
            if (d == steps if exact else 0 < d <= steps)]
-    if not out and not exact:                     # isolated: allow neighbours
-        out = sorted(NEIGHBOURS.get(start, ()))
-    return sorted(out, key=lambda p: (dist[p], NAME[p]))
+    if not out and not exact:                     # cut off: allow neighbours
+        out = sorted(adj.get(start, ()))
+    return sorted(out, key=lambda p: (dist.get(p, 99), NAME[p]))
 
 
 def find(text: str) -> str | None:
@@ -212,12 +241,16 @@ def find(text: str) -> str | None:
     return None
 
 
-def summary() -> str:
-    lines = [f"{len(PLACES)} مکان، {len(ROADS)} جاده", ""]
-    for pid, name, kind, _, _ in PLACES:
-        links = "، ".join(sorted(NAME[n] for n in NEIGHBOURS[pid]))
+def summary(adj=None) -> str:
+    """The map as it stands. Secret places are left out entirely."""
+    adj = adj or NEIGHBOURS
+    shown = [p for p in PLACES if p[0] not in SECRET]
+    edges = sum(len([n for n in adj[p[0]] if n not in SECRET]) for p in shown) // 2
+    lines = [f"{len(shown)} مکان، {edges} جاده", ""]
+    for pid, name, kind, _, _ in shown:
+        links = "، ".join(sorted(NAME[n] for n in adj[pid] if n not in SECRET))
         label = describe(pid) if kind == "oasis" else name
-        lines.append(f"• {label} → {links}")
+        lines.append(f"• {label} → {links or '—'}")
     return "\n".join(lines)
 
 

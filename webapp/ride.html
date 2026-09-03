@@ -611,6 +611,20 @@ function landmark(kind, x, groundY, s){
     cx.fillStyle='#4f8fa8'; cx.beginPath(); cx.ellipse(0,-6,120,20,0,0,7); cx.fill();
     cx.fillStyle='#7fc0d4'; cx.beginPath(); cx.ellipse(-18,-10,74,9,0,0,7); cx.fill();
     for(const dx of [-92,86]) prop('palm',dx,-4,1.1,'#3f7f4a','#6b4f30');
+  } else if(kind==='silo'){
+    /* a hardened door set into a low concrete apron, half-buried in sand */
+    cx.fillStyle='#6d6f6b';
+    cx.beginPath(); cx.moveTo(-96,0); cx.lineTo(-72,-30); cx.lineTo(72,-30);
+    cx.lineTo(96,0); cx.closePath(); cx.fill();
+    cx.fillStyle='#565854';
+    cx.fillRect(-52,-52,104,24);
+    cx.fillStyle='#3d3f3c';
+    for(let i=-2;i<=2;i++) cx.fillRect(i*20-3,-50,6,20);
+    cx.fillStyle='#7f8279';
+    cx.beginPath(); cx.moveTo(-30,-52); cx.lineTo(0,-74); cx.lineTo(30,-52);
+    cx.closePath(); cx.fill();
+    cx.fillStyle='#b8443a';
+    cx.beginPath(); cx.arc(0,-60,5,0,7); cx.fill();
   } else {                                   /* oasis */
     cx.fillStyle='#4f8fa8'; cx.beginPath(); cx.ellipse(0,-6,52,15,0,0,7); cx.fill();
     prop('palm',-40,-4,1.2,'#3f7f4a','#6b4f30');
@@ -1154,6 +1168,10 @@ const isCoarse = matchMedia && matchMedia('(pointer: coarse)').matches;
 const LOOK_X = 0.0090, LOOK_Y = 0.0060;
 
 function look(dx, dy){
+  /* A pointermove with no coordinates — a cancelled gesture, a synthetic
+     event — made dx NaN, which poisoned yaw, then viewShiftY, and finally
+     threw inside createLinearGradient. One bad event killed the frame. */
+  if(!Number.isFinite(dx) || !Number.isFinite(dy)) return;
   yawTarget   = Math.max(-YAW_MAX,   Math.min(YAW_MAX,   yawTarget   + dx*LOOK_X));
   pitchTarget = Math.max(-PITCH_MAX, Math.min(PITCH_MAX, pitchTarget - dy*LOOK_Y));
 }
@@ -1167,6 +1185,7 @@ cv.addEventListener('pointerdown', e => {
   cv.setPointerCapture && cv.setPointerCapture(e.pointerId);
 });
 cv.addEventListener('pointermove', e => {
+  if(!Number.isFinite(e.clientX) || !Number.isFinite(e.clientY)) return;
   if(dragging){
     const dx = e.clientX-dragX, dy = e.clientY-dragY;
     dragX = e.clientX; dragY = e.clientY;
@@ -1313,8 +1332,14 @@ function drawFrame(ts){
   if(!aiming && !dragging && !freeLook){ yawTarget *= 0.985; pitchTarget *= 0.985; }
   yaw   += (yawTarget   - yaw)   * Math.min(1, dt*9);
   pitch += (pitchTarget - pitch) * Math.min(1, dt*9);
+  /* Belt and braces: anything non-finite that reaches the camera turns every
+     coordinate downstream into NaN, and canvas throws rather than ignoring it. */
+  if(!Number.isFinite(yaw))   yaw   = yawTarget   = 0;
+  if(!Number.isFinite(pitch)) pitch = pitchTarget = 0;
   viewShiftX = -Math.tan(yaw)   * camDepth * Wd/2;
   viewShiftY =  Math.tan(pitch) * camDepth * Ht/2;
+  if(!Number.isFinite(viewShiftX)) viewShiftX = 0;
+  if(!Number.isFinite(viewShiftY)) viewShiftY = 0;
 
   const base = findSegment(position);
   const basePercent = (position % SEG_LEN)/SEG_LEN;
