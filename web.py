@@ -152,7 +152,11 @@ async def _hunt(request: aioweb.Request) -> aioweb.StreamResponse:
                             animal, hit, shots)
 
     fa = FA.get(animal, animal)
-    if bot is not None and chat_id:
+
+    # Announce in the group only when the ride was started there. A trip begun
+    # in the bot's private chat is private: the admin still gets the report.
+    started_in = trip.get("from_chat", chat_id)
+    if bot is not None and chat_id and started_in == chat_id:
         text = (f"🏹 <b>{name}</b> یک {fa} شکار کرد!"
                 if hit else
                 f"🏹 {fa} از دست <b>{name}</b> فرار کرد.")

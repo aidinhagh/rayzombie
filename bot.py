@@ -442,7 +442,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def who(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/whois <name> — test the matcher without rendering anything."""
+    """/whois <name> — test the matcher without rendering. Admin only."""
+    if not await admin_only(update, context):
+        return
     message = update.effective_message
     query = " ".join(context.args or [])
     if not query:
@@ -464,7 +466,9 @@ async def who(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def photo_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/photo [name] — bypass the cache and report exactly what Telegram says."""
+    """/photo [name] — what Telegram says about an avatar. Admin only."""
+    if not await admin_only(update, context):
+        return
     message = update.effective_message
     query = " ".join(context.args or [])
 
@@ -523,6 +527,18 @@ async def is_admin(bot, chat_id: int, user_id: int) -> bool:
     if not allowed:
         log.info("admin command refused for %s in %s", user_id, chat_id)
     return allowed
+
+
+async def admin_only(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Refuse and say so. Checked before any lookup, so a refused command
+    never reveals anything — not even which groups the bot knows about."""
+    message = update.effective_message
+    user = message.from_user if message else None
+    if user and await is_admin(context.bot, 0, user.id):
+        return True
+    if message:
+        await message.reply_text("فقط مدیر. ⛔️")
+    return False
 
 
 async def is_owner(bot, chat_id: int, user_id: int) -> bool:
@@ -602,7 +618,9 @@ async def delete_vote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/ping — is the deployed code the code you think it is?"""
+    """/ping — is the deployed code the code you think it is? Admin only."""
+    if not await admin_only(update, context):
+        return
     message = update.effective_message
     sender = message.from_user
     owner = "—"
@@ -1209,6 +1227,9 @@ async def on_travel_button(update: Update,
         "quarry": pick_quarry(),
         # server-side only; stripped before the page ever sees it
         "chat_id": chat_id, "user_id": user_id,
+        # where the trip was actually started. A ride begun in the bot's DM
+        # should not announce its hunt to the group.
+        "from_chat": query.message.chat_id if query.message else chat_id,
     }))
     markup = await ride_button(context.bot, ride_token, web.public_url())
     if markup is None:
@@ -1226,7 +1247,9 @@ async def on_travel_button(update: Update,
 # ------------------------------------------------------- looking after it all
 
 async def where(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/where [name] — one player, or everyone."""
+    """/where [name] — one player, or everyone. Admin only."""
+    if not await admin_only(update, context):
+        return
     message = update.effective_message
     chat_id, _ = await board_for(update, context)
     if chat_id is None:
@@ -1330,7 +1353,9 @@ async def clear_locations(update: Update,
 
 
 async def webcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/webcheck — why the ride button is or isn't there."""
+    """/webcheck — why the ride button is or isn't there. Admin only."""
+    if not await admin_only(update, context):
+        return
     global _bot_username
     if _bot_username is None:
         try:
@@ -1651,9 +1676,6 @@ PUBLIC_HELP = """📖 <b>راهنما</b>
   · روزی فقط یک بار، از ۰۰:۰۰ تا {deadline}:۰۰ به وقت تهران
   · بعد از {deadline} قرعه می‌افتد و جای کسانی که انتخاب نکرده‌اند تصادفی تعیین می‌شود
   · اولین سفرت هر جای نقشه می‌تواند باشد؛ بعد از آن تاس تعیین می‌کند تا کجا
-/where — موقعیت همه · /where ممد — موقعیت یک نفر
-/map — همهٔ مکان‌ها و جاده‌ها
-
 <b>مبارزه</b>
 /duel — چالش حمله / دفاع / حیله
   · حمله ← حیله، دفاع ← حمله، حیله ← دفاع
@@ -1665,9 +1687,8 @@ PUBLIC_HELP = """📖 <b>راهنما</b>
 /hunts — جدول شکار هفته
 
 <b>بقیه</b>
-/whois ممد — تست تشخیص اسم
-/photo — چرا عکس پروفایل نمی‌آید
-/ping /webcheck — وضعیت ربات"""
+/help — همین راهنما
+/whoami — آی‌دی خودت"""
 
 ADMIN_HELP = """
 
@@ -1680,6 +1701,11 @@ ADMIN_HELP = """
 /kill ممد — خارج از بازی (نه رأی می‌دهد، نه رأی می‌گیرد، نه سفر)
 /revive ممد — برگرداندن · /dead — لیست خارج‌شده‌ها
 /draw — اجرای فوری قرعهٔ {deadline}
+/where — موقعیت همه · /where ممد — یک نفر
+/map — همهٔ مکان‌ها و جاده‌ها
+/whois ممد — تست تشخیص اسم
+/photo — چرا عکس پروفایل نمی‌آید
+/ping · /webcheck — وضعیت ربات
 /delete ممد | all — حذف رأی
 /challengers · /responders — اجازهٔ مبارزه
 /road خراب کعبه - واحه ۸ — خراب کردن جاده
@@ -1780,18 +1806,23 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = message.from_user
     chat_id = message.chat_id if message.chat_id < 0 else 0
     ok = await is_admin(context.bot, chat_id, user.id)
-    resolved = await admin_id(context.bot)
-    await message.reply_text(
-        f"id: <code>{user.id}</code>\n"
-        f"@{user.username or '—'}\n"
-        f"مدیر: {'بله ✅' if ok else 'خیر'}\n"
-        f"ADMIN_IDS: {', '.join(str(i) for i in sorted(ADMIN_IDS)) or '—'}\n"
-        f"ADMIN_HANDLE: @{ADMIN_HANDLE} → {resolved or 'حل نشد'}",
-        parse_mode="HTML")
+    lines = [f"id: <code>{user.id}</code>",
+             f"@{user.username or '—'}",
+             f"مدیر: {'بله ✅' if ok else 'خیر'}"]
+    if ok:
+        # only the admin sees the configuration — telling everyone who the
+        # admin is, is itself information not worth handing out
+        resolved = await admin_id(context.bot)
+        lines.append(f"ADMIN_IDS: "
+                     f"{', '.join(str(i) for i in sorted(ADMIN_IDS)) or '—'}")
+        lines.append(f"ADMIN_HANDLE: @{ADMIN_HANDLE} → {resolved or 'حل نشد'}")
+    await message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def show_map(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/map — the roads as they stand right now, closures included."""
+    """/map — the roads as they stand right now, closures included. Admin only."""
+    if not await admin_only(update, context):
+        return
     chat_id, _ = await board_for(update, context)
     text = worldmap.summary(await chat_graph(chat_id) if chat_id else None)
     for chunk in [text[i:i + 3500] for i in range(0, len(text), 3500)]:
