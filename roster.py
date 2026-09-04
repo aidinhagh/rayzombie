@@ -11,6 +11,7 @@ asyncio.to_thread so the event loop never waits on disk.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
 import threading
@@ -715,8 +716,11 @@ def fold_onto_board(board: int = 0) -> dict[str, int]:
         except sqlite3.OperationalError:
             pass
 
+        # settings belongs here too: pending nicknames and the duel permission
+        # lists were stored per group, and without this they stay invisible to
+        # the shared board while looking like they saved correctly
         for table in ("players", "nicknames", "dead", "votes", "travels",
-                      "hunts", "members", "roadwork"):
+                      "hunts", "members", "roadwork", "settings"):
             try:
                 n = db.execute(f"SELECT COUNT(*) FROM {table} WHERE chat_id<>?",
                                (board,)).fetchone()[0]
@@ -730,5 +734,66 @@ def fold_onto_board(board: int = 0) -> dict[str, int]:
             db.execute(f"UPDATE OR REPLACE {table} SET chat_id=? WHERE chat_id<>?",
                        (board, board))
             moved[table] = n
+        db.commit()
+    return moved
+
+
+# ------------------------------------------------- people who have not shown up
+
+def placeholder_id(handle: str) -> int:
+    """A stable stand-in id for an @username the bot has never seen.
+
+    Telegram user ids are positive, so a negative one can never collide with a
+    real person. It lets you place or nickname someone before they have ever
+    typed anything, and the rows are moved onto their real id the moment they do.
+    """
+    digest = hashlib.sha1(handle.lower().lstrip("@").encode()).hexdigest()[:12]
+    return -(int(digest, 16) % 900_000_000 + 1000)
+
+
+def is_placeholder(user_id: int) -> bool:
+    return user_id < 0
+
+
+def merge_handle(board: int, handle: str, real_id: int) -> bool:
+    """Fold a placeholder's rows onto the real account. Real data always wins."""
+    if not handle or real_id <= 0:
+        return False
+    ghost = placeholder_id(handle)
+    moved = False
+    with _lock:
+        db = _db()
+        for table in ("players", "nicknames", "dead"):
+            try:
+                exists = db.execute(
+                    f"SELECT 1 FROM {table} WHERE chat_id=? AND user_id=?",
+                    (board, real_id)).fetchone()
+                row = db.execute(
+                    f"SELECT 1 FROM {table} WHERE chat_id=? AND user_id=?",
+                    (board, ghost)).fetchone()
+            except sqlite3.OperationalError:
+                continue
+            if not row:
+                continue
+            if exists:
+                db.execute(f"DELETE FROM {table} WHERE chat_id=? AND user_id=?",
+                           (board, ghost))
+            else:
+                db.execute(
+                    f"UPDATE OR REPLACE {table} SET user_id=?"
+                    f" WHERE chat_id=? AND user_id=?", (real_id, board, ghost))
+                moved = True
+        for table, col in (("travels", "user_id"), ("hunts", "user_id"),
+                           ("votes", "voter_id")):
+            try:
+                db.execute(f"UPDATE {table} SET {col}=? WHERE chat_id=? AND {col}=?",
+                           (real_id, board, ghost))
+            except sqlite3.OperationalError:
+                pass
+        try:
+            db.execute("UPDATE votes SET target_key=? WHERE chat_id=? AND target_key=?",
+                       (f"id:{real_id}", board, f"id:{ghost}"))
+        except sqlite3.OperationalError:
+            pass
         db.commit()
     return moved

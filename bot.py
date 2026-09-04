@@ -199,6 +199,10 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if user:
             await asyncio.to_thread(roster.remember, GAME, user)
             if user.username:
+                if await asyncio.to_thread(roster.merge_handle, GAME,
+                                           user.username, user.id):
+                    log.info("bound placeholder @%s -> %s", user.username, user.id)
+            if user.username:
                 await asyncio.to_thread(roster.store_handle, user.username, user.id)
             await bind_pending_nick(chat_id, user)
 
@@ -985,6 +989,12 @@ PAGE = 8                    # destinations per keyboard page
 # 2022, so +03:30 holds all year and a fixed offset is safe.
 TEHRAN = dt.timezone(dt.timedelta(hours=3, minutes=30))
 DEADLINE_HOUR = 20
+
+# Board state — who is where, and who is behind which nickname — is the admin's
+# alone. With this on, nothing that names a player alongside a place is ever
+# sent to a group: the player is told privately, the admin is told, and the
+# group sees only that something happened.
+PRIVATE_BOARD = True
 DART_EMOJI = "🎯"
 DICE_EMOJI = "🎲"
 DICE_PAUSE = 4.2            # let the Telegram randomizer animation land
@@ -1116,7 +1126,7 @@ def destination_keyboard(token: str, options: list[str], page: int,
     return InlineKeyboardMarkup(rows)
 
 
-async def chat_graph(chat_id: int):
+async def chat_graph(chat_id: int = GAME):
     closed, extra = await asyncio.to_thread(roster.roadwork, GAME)
     return worldmap.build_graph(closed, extra)
 
@@ -1166,6 +1176,7 @@ async def travel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     real = display_name(user)
+    # kept for the admin's report only; players never see each other's nicknames
     name = await game_name(chat_id, user.id, real)
     origin = await asyncio.to_thread(roster.get_place, GAME, user.id)
 
@@ -1183,7 +1194,7 @@ async def travel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         roll = None
         await asyncio.sleep(DICE_PAUSE)
         options = list(worldmap.IDS)
-        head = (f"🗺 <b>{name}</b> هنوز جایی نیست.\n"
+        head = (f"🗺 <b>{real}</b> هنوز جایی نیست.\n"
                 f"برای شروع هر جای نقشه را می‌توانی انتخاب کنی:")
     else:
         # Later trips: dart + normal dice. Only the dice controls travel range.
@@ -1196,7 +1207,7 @@ async def travel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         options = worldmap.reachable(origin, roll, exact=EXACT_STEPS, adj=adj)
         if not options:
             options = worldmap.reachable(origin, roll, exact=False, adj=adj)
-        head = (f"🎲 <b>{name}</b> عدد {fa_num(roll)} آورد.\n"
+        head = (f"🎯 <b>{real}</b> عدد {fa_num(roll)} آورد.\n"
                 f"از <b>{worldmap.describe(origin)}</b> می‌توانی بروی به:")
 
     await report_roll(context.bot, chat_id, name, real, origin, dart_roll, roll)
@@ -1261,25 +1272,28 @@ async def on_travel_button(update: Update,
     await asyncio.to_thread(roster.set_place, GAME, user_id, real, arg)
     await asyncio.to_thread(roster.log_travel, GAME, user_id, real, arg,
                             origin, roll)
+    # Real names on the road. A nickname is something only the admin knows, so
+    # showing other riders' nicknames would hand them out to everyone who
+    # travels to the same place.
     others = await asyncio.to_thread(roster.others_at, GAME, arg, user_id, 3)
-    nicks = await asyncio.to_thread(roster.all_nicks, GAME)
-    if nicks:
-        rows = await asyncio.to_thread(roster.all_players, GAME)
-        by_name = {r[1]: r[0] for r in rows}
-        others = [nicks.get(by_name.get(n), n) for n in others]
 
     await query.answer(f"راهیِ {worldmap.name_of(arg)} شدی 🐫")
 
     # Who is already there is deliberately NOT announced — you find that out by
     # seeing them on the road during the ride.
-    text = (f"🐫 <b>{name}</b> از "
+    full = (f"🐫 <b>{real}</b> از "
             f"<b>{worldmap.describe(origin) if origin else 'ناکجا'}</b> "
             f"راهی <b>{worldmap.describe(arg)}</b> شد.")
+    in_group = query.message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+    # In a group the destination is withheld: the rider gets it privately, the
+    # admin gets it, and everyone else sees only that a move was made.
+    text = ("🐫 <b>" + real + "</b> حرکتش را انتخاب کرد."
+            if (PRIVATE_BOARD and in_group) else full)
 
     ride_token = secrets.token_urlsafe(8).replace("-", "_")
     await asyncio.to_thread(roster.save_trip, ride_token, json.dumps({
         "to": arg, "kind": worldmap.KIND.get(arg, "oasis"),
-        "title": worldmap.name_of(arg), "name": name,
+        "title": worldmap.name_of(arg), "name": real,
         "from": worldmap.name_of(origin) if origin else "",
         "others": others,
         "quarry": pick_quarry(),
@@ -1298,8 +1312,19 @@ async def on_travel_button(update: Update,
 
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
 
-    title = query.message.chat.title or str(chat_id)
+    # chat_id is the shared board (0) — say where they actually did it
+    title = (query.message.chat.title
+             or ("پیوی" if query.message.chat.type == ChatType.PRIVATE
+                 else str(query.message.chat_id)))
     await report_to_admin(context.bot, title, name, origin, arg, roll)
+
+    # tell the rider where they went, out of everyone else's sight
+    if PRIVATE_BOARD and in_group:
+        try:
+            await context.bot.send_message(user_id, full, parse_mode="HTML",
+                                           reply_markup=markup)
+        except Exception as exc:
+            log.info("private move note failed for %s: %s", user_id, exc)
 
 
 # ------------------------------------------------------- looking after it all
@@ -1491,6 +1516,11 @@ async def resolve_person(bot, chat_id: int, text: str):
                 if cand.user_id == cached:
                     return cached, cand.display
             return cached, f"@{handle}"
+        if text.startswith("@"):
+            # Never seen. Give them a placeholder so they can be nicknamed and
+            # placed now; the rows move onto the real account the first time
+            # Telegram shows the bot that username.
+            return roster.placeholder_id(handle), f"@{handle}"
 
     target, _score = best_match(text, await chat_candidates(chat_id))
     if not target:
@@ -1740,13 +1770,33 @@ async def assign_missing(context: ContextTypes.DEFAULT_TYPE) -> None:
             if roll:
                 piece += f" (تاس {fa_num(roll)})"
             lines.append(piece)
-        # one game, but the announcement goes to every group it is played in
-        for group in await asyncio.to_thread(roster.groups):
+
+        # The full draw goes to the admin only — it is a list of who is where,
+        # which is exactly what must not appear in a group.
+        target = await admin_id(context.bot)
+        if target:
             try:
-                await context.bot.send_message(group, "\n".join(lines),
+                await context.bot.send_message(target, "\n".join(lines),
                                                parse_mode="HTML")
             except Exception as exc:
-                log.info("deadline announcement failed in %s: %s", group, exc)
+                log.info("deadline report to admin failed: %s", exc)
+
+        if not PRIVATE_BOARD:
+            for group in await asyncio.to_thread(roster.groups):
+                try:
+                    await context.bot.send_message(group, "\n".join(lines),
+                                                   parse_mode="HTML")
+                except Exception as exc:
+                    log.info("deadline announcement failed in %s: %s", group, exc)
+        else:
+            # the group learns only that the deadline passed
+            for group in await asyncio.to_thread(roster.groups):
+                try:
+                    await context.bot.send_message(
+                        group, f"⏰ مهلت امروز تمام شد. برای "
+                               f"{fa_num(len(moved))} نفر قرعه افتاد.")
+                except Exception as exc:
+                    log.info("deadline note failed in %s: %s", group, exc)
 
 
 async def deadline_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

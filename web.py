@@ -153,19 +153,9 @@ async def _hunt(request: aioweb.Request) -> aioweb.StreamResponse:
 
     fa = FA.get(animal, animal)
 
-    # Announce in the group only when the ride was started there. A trip begun
-    # in the bot's private chat is private: the admin still gets the report.
-    # chat_id is the game board (shared); from_chat is the real chat the ride
-    # was started in. Announce only for a ride begun in a group.
-    started_in = trip.get("from_chat")
-    if bot is not None and started_in and started_in < 0:
-        text = (f"🏹 <b>{name}</b> یک {fa} شکار کرد!"
-                if hit else
-                f"🏹 {fa} از دست <b>{name}</b> فرار کرد.")
-        try:
-            await bot.send_message(started_in, text, parse_mode="HTML")
-        except Exception as exc:
-            log.info("hunt announcement failed: %s", exc)
+    # A hunt result names a player and where they were going, which is board
+    # state — so it is never announced in a group. The rider already sees it on
+    # the arrival screen; the admin gets the detail below.
 
     # the admin gets the detail: who, what, and whether it landed
     if bot is not None and admin_id_getter is not None:
