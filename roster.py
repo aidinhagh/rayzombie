@@ -692,3 +692,43 @@ def groups() -> list[int]:
         except ValueError:
             continue
     return out
+
+
+# --------------------------------------------------- one-time board migration
+
+def fold_onto_board(board: int = 0) -> dict[str, int]:
+    """Move any per-group rows onto the shared board.
+
+    Runs at startup and is idempotent: once everything is on the board there is
+    nothing left to move and it reports zeros. Doing it here rather than in a
+    script means no shell is needed on a host that does not give you one.
+    """
+    moved: dict[str, int] = {}
+    with _lock:
+        db = _db()
+        # remember which groups existed, so the draw still has somewhere to post
+        try:
+            db.execute(
+                "INSERT OR REPLACE INTO settings (chat_id, key, value)"
+                " SELECT ?, 'group:' || chat_id, '' FROM members"
+                " WHERE chat_id < 0 GROUP BY chat_id", (board,))
+        except sqlite3.OperationalError:
+            pass
+
+        for table in ("players", "nicknames", "dead", "votes", "travels",
+                      "hunts", "members", "roadwork"):
+            try:
+                n = db.execute(f"SELECT COUNT(*) FROM {table} WHERE chat_id<>?",
+                               (board,)).fetchone()[0]
+            except sqlite3.OperationalError:
+                continue
+            if not n:
+                moved[table] = 0
+                continue
+            # OR REPLACE: if the same person exists on two boards, the row that
+            # lands last wins rather than the migration failing on a conflict
+            db.execute(f"UPDATE OR REPLACE {table} SET chat_id=? WHERE chat_id<>?",
+                       (board, board))
+            moved[table] = n
+        db.commit()
+    return moved

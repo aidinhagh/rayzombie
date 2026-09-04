@@ -1984,6 +1984,13 @@ def main() -> None:
 
     seed.install()
 
+    folded = roster.fold_onto_board(GAME)
+    if any(folded.values()):
+        log.info("folded onto the shared board: %s",
+                 {k: v for k, v in folded.items() if v})
+    else:
+        log.info("board already unified")
+
     # Python 3.14 removed the implicit loop that python-telegram-bot's
     # run_polling() still expects from asyncio.get_event_loop().
     try:
