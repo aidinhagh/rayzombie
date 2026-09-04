@@ -148,18 +148,18 @@ async def bind_pending_nick(chat_id: int, user) -> str | None:
 
     # Numeric ID is authoritative if both an id and username pending value exist.
     id_key = _pending_nick_id_key(user.id)
-    nick = await asyncio.to_thread(roster.get_setting, chat_id, id_key)
+    nick = await asyncio.to_thread(roster.get_setting, GAME, id_key)
 
     user_key = _pending_nick_user_key(username) if username else None
     if not nick and user_key:
-        nick = await asyncio.to_thread(roster.get_setting, chat_id, user_key)
+        nick = await asyncio.to_thread(roster.get_setting, GAME, user_key)
 
     _pending_nick_checked.add(check_key)
     if not nick:
         return None
 
     try:
-        await asyncio.to_thread(roster.set_nick, chat_id, user.id, nick)
+        await asyncio.to_thread(roster.set_nick, GAME, user.id, nick)
     except Exception:
         # Keep the pending settings intact so the next restart/message can retry.
         log.exception("failed to bind pending nickname for %s in %s",
@@ -168,9 +168,9 @@ async def bind_pending_nick(chat_id: int, user) -> str | None:
         return None
 
     # It is bound now; these are only temporary lookup records.
-    await asyncio.to_thread(roster.set_setting, chat_id, id_key, "")
+    await asyncio.to_thread(roster.set_setting, GAME, id_key, "")
     if user_key:
-        await asyncio.to_thread(roster.set_setting, chat_id, user_key, "")
+        await asyncio.to_thread(roster.set_setting, GAME, user_key, "")
 
     log.info("bound pending nickname in %s: %s (@%s) -> %r",
              chat_id, user.id, username or "—", nick)
@@ -193,15 +193,17 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if entity.type == MessageEntity.TEXT_MENTION and entity.user:
             people.append(entity.user)
 
+    await asyncio.to_thread(roster.remember_group, chat_id, message.chat.title)
+
     for user in people:
         if user:
-            await asyncio.to_thread(roster.remember, chat_id, user)
+            await asyncio.to_thread(roster.remember, GAME, user)
             if user.username:
                 await asyncio.to_thread(roster.store_handle, user.username, user.id)
             await bind_pending_nick(chat_id, user)
 
     if message.left_chat_member:
-        await asyncio.to_thread(roster.forget, chat_id, message.left_chat_member.id)
+        await asyncio.to_thread(roster.forget, GAME, message.left_chat_member.id)
 
 
 async def seed_admins(bot, chat_id: int) -> None:
@@ -211,7 +213,7 @@ async def seed_admins(bot, chat_id: int) -> None:
     _admins_seeded[chat_id] = time.time()
     try:
         for member in await bot.get_chat_administrators(chat_id):
-            await asyncio.to_thread(roster.remember, chat_id, member.user)
+            await asyncio.to_thread(roster.remember, GAME, member.user)
             if member.user.username:
                 await asyncio.to_thread(roster.store_handle,
                                         member.user.username, member.user.id)
@@ -229,7 +231,7 @@ def _as_candidate(user) -> Candidate:
 
 async def chat_candidates(chat_id: int) -> list[Candidate]:
     """Everyone the bot has seen here, plus the seed list for those it hasn't."""
-    people = await asyncio.to_thread(roster.members, chat_id)
+    people = await asyncio.to_thread(roster.members, GAME)
     ids = {p.user_id for p in people}
     handles = {matching.normalize(p.username).replace(" ", "")
                for p in people if p.username}
@@ -391,7 +393,7 @@ async def on_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     chat_id = message.chat_id
     voter = message.from_user.id if message.from_user else 0
-    if voter and await asyncio.to_thread(roster.is_dead, chat_id, voter):
+    if voter and await asyncio.to_thread(roster.is_dead, GAME, voter):
         await message.reply_text("مرده‌ها رأی نمی‌دهند. ⚰️")
         return
     now = time.monotonic()
@@ -407,7 +409,7 @@ async def on_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         target, score = await resolve_target(message, query)
 
         if target and target.user_id and await asyncio.to_thread(
-                roster.is_dead, chat_id, target.user_id):
+                roster.is_dead, GAME, target.user_id):
             label = seed.display_for(target) or target.display
             await message.reply_text(f"«{label}» از بازی خارج شده. ⚰️")
             return
@@ -429,9 +431,9 @@ async def on_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         # burn that allowance — it never counted, so it costs nothing.
         already = None
         if not immune:
-            already = await asyncio.to_thread(roster.last_vote, chat_id, voter)
+            already = await asyncio.to_thread(roster.last_vote, GAME, voter)
             if already is None:
-                await asyncio.to_thread(roster.record_vote, chat_id, voter,
+                await asyncio.to_thread(roster.record_vote, GAME, voter,
                                         vote_key(target, label), label)
 
         photo_key = str(target.user_id) if (target and photo) else "-"
@@ -467,7 +469,7 @@ async def show_tally(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     _last_tally[chat_id] = now
 
-    rows, voters = await asyncio.to_thread(roster.tally, chat_id)
+    rows, voters = await asyncio.to_thread(roster.tally, GAME)
     if not rows:
         await message.reply_text("در ۲۴ ساعت گذشته رأیی ثبت نشده. 🗳")
         return
@@ -643,13 +645,13 @@ async def delete_vote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     query = " ".join(context.args or [])
 
     if query.strip().lower() in ("all", "همه"):
-        removed = await asyncio.to_thread(roster.clear_votes, chat_id)
+        removed = await asyncio.to_thread(roster.clear_votes, GAME)
         await message.reply_text(f"همهٔ {fa(removed)} رأی ۲۴ ساعت گذشته پاک شد. 🧹")
         return
 
     if message.reply_to_message and not query:
         person = message.reply_to_message.from_user
-        removed = await asyncio.to_thread(roster.delete_votes_by, chat_id, person.id)
+        removed = await asyncio.to_thread(roster.delete_votes_by, GAME, person.id)
         if removed:
             await message.reply_text(
                 f"رأی {person.first_name} حذف شد — می‌تواند دوباره رأی بدهد. ✅"
@@ -669,7 +671,7 @@ async def delete_vote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     target, score = best_match(query, await chat_candidates(chat_id))
     label = (seed.display_for(target) or target.display) if target else query
     key = vote_key(target, label)
-    removed = await asyncio.to_thread(roster.delete_votes_for, chat_id, key, label)
+    removed = await asyncio.to_thread(roster.delete_votes_for, GAME, key, label)
 
     if removed:
         await message.reply_text(f"{fa(removed)} رأی داده‌شده به «{label}» حذف شد. 🗑")
@@ -732,7 +734,7 @@ def move_keyboard(token: str) -> InlineKeyboardMarkup:
 
 
 async def may(chat_id: int, user_id: int, key: str) -> bool:
-    raw = await asyncio.to_thread(roster.get_setting, chat_id, key)
+    raw = await asyncio.to_thread(roster.get_setting, GAME, key)
     if not raw or raw == "all":
         return True
     return str(user_id) in raw.split(",")
@@ -747,7 +749,7 @@ async def game_name(chat_id: int, user_id: int, fallback: str) -> str:
 
     Real names only ever appear in /rollcall, which is admin-only.
     """
-    nick = await asyncio.to_thread(roster.get_nick, chat_id, user_id)
+    nick = await asyncio.to_thread(roster.get_nick, GAME, user_id)
     return nick or fallback
 
 
@@ -896,7 +898,7 @@ async def set_roles(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await message.reply_text("این دستور فقط داخل گروه کار می‌کند.")
         return
 
-    raw = await asyncio.to_thread(roster.get_setting, chat_id, key)
+    raw = await asyncio.to_thread(roster.get_setting, GAME, key)
 
     if not context.args:
         if not raw or raw == "all":
@@ -915,7 +917,7 @@ async def set_roles(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if context.args[0].lower() in ("all", "همه"):
-        await asyncio.to_thread(roster.set_setting, chat_id, key, "all")
+        await asyncio.to_thread(roster.set_setting, GAME, key, "all")
         await message.reply_text(f"اجازهٔ {label}: همه ✅")
         return
 
@@ -940,7 +942,7 @@ async def set_roles(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await message.reply_text("کسی پیدا نشد: " + "، ".join(missed))
         return
 
-    await asyncio.to_thread(roster.set_setting, chat_id, key, ",".join(ids))
+    await asyncio.to_thread(roster.set_setting, GAME, key, ",".join(ids))
     text = f"اجازهٔ {label}: " + "، ".join(named)
     if missed:
         text += "\nپیدا نشد: " + "، ".join(missed)
@@ -995,45 +997,23 @@ def fa_num(n: int) -> str:
     return str(n).translate(_FA_DIGITS)
 
 
-HOME_KEY = "home"          # settings row (chat_id 0) remembering a DM's board
+# Every group is the same game. Positions, nicknames, votes, roads, hunts and
+# the dead all live on one board, so it makes no difference which chat someone
+# happens to be typing in. Real chat ids are still used to SEND messages — this
+# constant only ever keys stored data.
+GAME = 0
+
+HOME_KEY = "home"          # kept so old settings rows do not confuse anything
 
 
 async def board_for(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Which group's board does this message act on?
+    """There is one board. Groups and private chats all read and write it.
 
-    In a group: that group. In a DM there is no board of its own, so it acts on
-    the group the person plays in — remembered after the first time, and asked
-    about only when they belong to more than one.
+    This used to resolve which group a private chat referred to, remembered per
+    user and sticky — which meant a DM could answer about a group nobody was
+    playing in any more, and look like lost data.
     """
-    message = update.effective_message
-    if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
-        return message.chat_id, None
-
-    user_id = message.from_user.id
-    saved = await asyncio.to_thread(roster.get_setting, 0, f"{HOME_KEY}:{user_id}")
-    if saved:
-        return int(saved), None
-
-    chats = await asyncio.to_thread(roster.chats_for_user, user_id)
-    if not chats:
-        await message.reply_text(
-            "اول باید در گروه یک پیام بدهی تا بشناسمت، بعد اینجا هم می‌شود بازی کرد."
-        )
-        return None, None
-    if len(chats) == 1:
-        await asyncio.to_thread(roster.set_setting, 0, f"{HOME_KEY}:{user_id}",
-                                str(chats[0]))
-        return chats[0], None
-
-    rows = []
-    for cid in chats[:6]:
-        try:
-            title = (await context.bot.get_chat(cid)).title or str(cid)
-        except Exception:
-            title = str(cid)
-        rows.append([InlineKeyboardButton(title, callback_data=f"t|home|0|{cid}")])
-    await message.reply_text("کدام گروه؟", reply_markup=InlineKeyboardMarkup(rows))
-    return None, "asked"
+    return GAME, None
 
 
 async def admin_id(bot) -> int | None:
@@ -1137,7 +1117,7 @@ def destination_keyboard(token: str, options: list[str], page: int,
 
 
 async def chat_graph(chat_id: int):
-    closed, extra = await asyncio.to_thread(roster.roadwork, chat_id)
+    closed, extra = await asyncio.to_thread(roster.roadwork, GAME)
     return worldmap.build_graph(closed, extra)
 
 
@@ -1149,7 +1129,7 @@ async def visible_options(bot, chat_id: int, user_id: int, origin: str | None,
     to find it is to have taken an eagle and then stand in the cemetery.
     """
     allowed = []
-    earned = await asyncio.to_thread(roster.has_killed, chat_id, user_id, "eagle")
+    earned = await asyncio.to_thread(roster.has_killed, GAME, user_id, "eagle")
     for pid in options:
         if pid in worldmap.SECRET:
             continue
@@ -1168,7 +1148,7 @@ async def travel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     user = message.from_user
 
-    if await asyncio.to_thread(roster.is_dead, chat_id, user.id):
+    if await asyncio.to_thread(roster.is_dead, GAME, user.id):
         await message.reply_text("تو از بازی خارج شده‌ای. ⚰️")
         return
     if past_deadline():
@@ -1177,8 +1157,8 @@ async def travel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"{time_until_open()} دیگر دوباره باز می‌شود."
         )
         return
-    if await asyncio.to_thread(roster.last_move, chat_id, user.id) >= day_start():
-        here = await asyncio.to_thread(roster.get_place, chat_id, user.id)
+    if await asyncio.to_thread(roster.last_move, GAME, user.id) >= day_start():
+        here = await asyncio.to_thread(roster.get_place, GAME, user.id)
         await message.reply_text(
             f"امروز جابه‌جا شدی — {worldmap.describe(here) if here else ''}\n"
             f"روزی یک بار. {time_until_open()} دیگر دوباره می‌توانی."
@@ -1187,7 +1167,7 @@ async def travel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     real = display_name(user)
     name = await game_name(chat_id, user.id, real)
-    origin = await asyncio.to_thread(roster.get_place, chat_id, user.id)
+    origin = await asyncio.to_thread(roster.get_place, GAME, user.id)
 
     adj = await chat_graph(chat_id)
 
@@ -1248,10 +1228,8 @@ async def on_travel_button(update: Update,
         return
 
     if action == "home":
-        await asyncio.to_thread(roster.set_setting, 0,
-                                f"{HOME_KEY}:{query.from_user.id}", arg)
-        await query.answer("ثبت شد.")
-        await query.edit_message_text("گروه ثبت شد. حالا /travel بزن.")
+        # one board now: nothing to choose
+        await query.answer()
         return
 
     trip = _journeys.get(token)
@@ -1280,13 +1258,13 @@ async def on_travel_button(update: Update,
 
     # keep the real name in the record: the nickname is a display layer, and
     # writing it into players.name wiped the only copy of who this actually is
-    await asyncio.to_thread(roster.set_place, chat_id, user_id, real, arg)
-    await asyncio.to_thread(roster.log_travel, chat_id, user_id, real, arg,
+    await asyncio.to_thread(roster.set_place, GAME, user_id, real, arg)
+    await asyncio.to_thread(roster.log_travel, GAME, user_id, real, arg,
                             origin, roll)
-    others = await asyncio.to_thread(roster.others_at, chat_id, arg, user_id, 3)
-    nicks = await asyncio.to_thread(roster.all_nicks, chat_id)
+    others = await asyncio.to_thread(roster.others_at, GAME, arg, user_id, 3)
+    nicks = await asyncio.to_thread(roster.all_nicks, GAME)
     if nicks:
-        rows = await asyncio.to_thread(roster.all_players, chat_id)
+        rows = await asyncio.to_thread(roster.all_players, GAME)
         by_name = {r[1]: r[0] for r in rows}
         others = [nicks.get(by_name.get(n), n) for n in others]
 
@@ -1306,7 +1284,7 @@ async def on_travel_button(update: Update,
         "others": others,
         "quarry": pick_quarry(),
         # server-side only; stripped before the page ever sees it
-        "chat_id": chat_id, "user_id": user_id,
+        "chat_id": GAME, "user_id": user_id,
         # where the trip was actually started. A ride begun in the bot's DM
         # should not announce its hunt to the group.
         "from_chat": query.message.chat_id if query.message else chat_id,
@@ -1341,7 +1319,7 @@ async def where(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not target:
             await message.reply_text("کسی پیدا نشد.")
             return
-        place = await asyncio.to_thread(roster.get_place, chat_id,
+        place = await asyncio.to_thread(roster.get_place, GAME,
                                         target.user_id)
         label = await game_name(chat_id, target.user_id,
                                 seed.display_for(target) or target.display)
@@ -1351,9 +1329,9 @@ async def where(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    rows = await asyncio.to_thread(roster.all_players, chat_id)
-    gone = await asyncio.to_thread(roster.dead_ids, chat_id)
-    nicks = await asyncio.to_thread(roster.all_nicks, chat_id)
+    rows = await asyncio.to_thread(roster.all_players, GAME)
+    gone = await asyncio.to_thread(roster.dead_ids, GAME)
+    nicks = await asyncio.to_thread(roster.all_nicks, GAME)
     rows = [r for r in rows if r[0] not in gone]
     if not rows:
         await message.reply_text("هنوز کسی روی نقشه نیست.")
@@ -1398,7 +1376,7 @@ async def set_location(update: Update,
         await message.reply_text("این نفر هنوز آی‌دی ندارد — یک پیام بدهد.")
         return
     label = seed.display_for(target) or target.display
-    await asyncio.to_thread(roster.set_place, chat_id, uid, label, place)
+    await asyncio.to_thread(roster.set_place, GAME, uid, label, place)
     shown = await game_name(chat_id, uid, label)
     await message.reply_text(f"{shown} → {worldmap.name_of(place)} ✅")
 
@@ -1416,7 +1394,7 @@ async def clear_locations(update: Update,
 
     arg = " ".join(context.args or []).strip()
     if arg.lower() in ("all", "همه", ""):
-        removed = await asyncio.to_thread(roster.clear_all_places, chat_id)
+        removed = await asyncio.to_thread(roster.clear_all_places, GAME)
         await message.reply_text(
             f"{fa_num(removed)} موقعیت پاک شد. همه از اول شروع می‌کنند. 🧹")
         return
@@ -1426,7 +1404,7 @@ async def clear_locations(update: Update,
         await message.reply_text("کسی پیدا نشد.")
         return
     uid = await ensure_user_id(context.bot, target)
-    removed = await asyncio.to_thread(roster.clear_place, chat_id, uid or 0)
+    removed = await asyncio.to_thread(roster.clear_place, GAME, uid or 0)
     label = seed.display_for(target) or target.display
     await message.reply_text(
         f"موقعیت {label} پاک شد." if removed else f"{label} روی نقشه نبود.")
@@ -1443,8 +1421,13 @@ async def webcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             _bot_username = ""
     base = web.public_url()
+    counts = await asyncio.to_thread(roster.counts)
     lines = [
         f"نسخه: {VERSION}",
+        f"دیتابیس: <code>{roster.DB_PATH}</code>"
+        f"{' ⚠️ موقتی' if not roster.DB_PATH.startswith('/data') else ' ✅'}",
+        f"بازیکن‌ها: {counts.get('players', 0)} · لقب‌ها: {counts.get('nicknames', 0)}"
+        f" · رأی‌ها: {counts.get('votes', 0)}",
         f"RAILWAY_PUBLIC_DOMAIN: {os.environ.get('RAILWAY_PUBLIC_DOMAIN') or '—'}",
         f"WEBAPP_URL: {os.environ.get('WEBAPP_URL') or '—'}",
         f"public_url(): {base or '—'}",
@@ -1466,7 +1449,7 @@ async def hunts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id, _ = await board_for(update, context)
     if chat_id is None:
         return
-    rows = await asyncio.to_thread(roster.hunt_tally, chat_id)
+    rows = await asyncio.to_thread(roster.hunt_tally, GAME)
     if not rows:
         await message.reply_text("این هفته کسی شکاری نکرده. 🏹")
         return
@@ -1489,11 +1472,11 @@ async def resolve_person(bot, chat_id: int, text: str):
 
     if text.isdigit():
         uid = int(text)
-        rows = await asyncio.to_thread(roster.all_players, chat_id)
+        rows = await asyncio.to_thread(roster.all_players, GAME)
         for row_id, name, *_ in rows:
             if row_id == uid:
                 return uid, name
-        people = await asyncio.to_thread(roster.members, chat_id)
+        people = await asyncio.to_thread(roster.members, GAME)
         for cand in people:
             if cand.user_id == uid:
                 return uid, cand.display
@@ -1503,7 +1486,7 @@ async def resolve_person(bot, chat_id: int, text: str):
     if handle:
         cached = await asyncio.to_thread(roster.known_handle, handle)
         if cached:
-            people = await asyncio.to_thread(roster.members, chat_id)
+            people = await asyncio.to_thread(roster.members, GAME)
             for cand in people:
                 if cand.user_id == cached:
                     return cached, cand.display
@@ -1553,10 +1536,10 @@ async def set_nick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if who.isdigit():
         uid = int(who)
         id_key = _pending_nick_id_key(uid)
-        await asyncio.to_thread(roster.set_setting, chat_id, id_key, nick)
+        await asyncio.to_thread(roster.set_setting, GAME, id_key, nick)
 
         try:
-            await asyncio.to_thread(roster.set_nick, chat_id, uid, nick or None)
+            await asyncio.to_thread(roster.set_nick, GAME, uid, nick or None)
         except Exception as exc:
             log.info("nickname for unseen id %s saved pending: %s", uid, exc)
 
@@ -1579,18 +1562,18 @@ async def set_nick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         # This makes an unknown username assignable immediately as a pending
         # identity, instead of answering "not found".
-        await asyncio.to_thread(roster.set_setting, chat_id, user_key, nick)
+        await asyncio.to_thread(roster.set_setting, GAME, user_key, nick)
 
         cached = await asyncio.to_thread(roster.known_handle, handle)
         if cached:
             # We already know this username's numeric ID from any previous
             # observation, so activate the nickname now as well.
             await asyncio.to_thread(
-                roster.set_setting, chat_id, _pending_nick_id_key(cached), nick
+                roster.set_setting, GAME, _pending_nick_id_key(cached), nick
             )
             try:
                 await asyncio.to_thread(
-                    roster.set_nick, chat_id, cached, nick or None
+                    roster.set_nick, GAME, cached, nick or None
                 )
             except Exception as exc:
                 log.info("nickname for @%s/%s saved pending: %s",
@@ -1623,7 +1606,7 @@ async def set_nick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"«{who}» پیدا نشد. از @یوزرنیم یا آی‌دی عددی استفاده کن.")
         return
 
-    await asyncio.to_thread(roster.set_nick, chat_id, uid, nick or None)
+    await asyncio.to_thread(roster.set_nick, GAME, uid, nick or None)
     await message.reply_text(f"{real} → «{nick}» ✅" if nick
                              else f"لقب {real} پاک شد.")
 
@@ -1638,9 +1621,9 @@ async def rollcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await message.reply_text("فقط مدیر. ⛔️")
         return
 
-    rows = await asyncio.to_thread(roster.all_players, chat_id)
-    nicks = await asyncio.to_thread(roster.all_nicks, chat_id)
-    gone = await asyncio.to_thread(roster.dead_ids, chat_id)
+    rows = await asyncio.to_thread(roster.all_players, GAME)
+    nicks = await asyncio.to_thread(roster.all_nicks, GAME)
+    gone = await asyncio.to_thread(roster.dead_ids, GAME)
     rows = [r for r in rows if r[0] not in gone]
     if not rows:
         await message.reply_text("هنوز کسی روی نقشه نیست.")
@@ -1663,9 +1646,9 @@ async def board(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await message.reply_text("فقط مدیر. ⛔️")
         return
 
-    rows = await asyncio.to_thread(roster.all_players, chat_id)
-    nicks = await asyncio.to_thread(roster.all_nicks, chat_id)
-    gone = await asyncio.to_thread(roster.dead_ids, chat_id)
+    rows = await asyncio.to_thread(roster.all_players, GAME)
+    nicks = await asyncio.to_thread(roster.all_nicks, GAME)
+    gone = await asyncio.to_thread(roster.dead_ids, GAME)
     rows = [r for r in rows if r[0] not in gone]
     if not rows:
         await message.reply_text("هنوز کسی روی نقشه نیست.")
@@ -1717,17 +1700,15 @@ async def assign_missing(context: ContextTypes.DEFAULT_TYPE) -> None:
     a first turn.
     """
     since = day_start()                  # anyone who has not moved today
-    for chat_id in await asyncio.to_thread(roster.known_chats):
-        try:
-            stale = await asyncio.to_thread(roster.stale_players, chat_id, since)
-        except Exception:
-            continue
-        if not stale:
-            continue
+    try:
+        stale = await asyncio.to_thread(roster.stale_players, GAME, since)
+    except Exception:
+        stale = []
+    if stale:
 
-        nicks = await asyncio.to_thread(roster.all_nicks, chat_id)
-        gone = await asyncio.to_thread(roster.dead_ids, chat_id)
-        adj = await chat_graph(chat_id)
+        nicks = await asyncio.to_thread(roster.all_nicks, GAME)
+        gone = await asyncio.to_thread(roster.dead_ids, GAME)
+        adj = await chat_graph()
         moved = []
         for user_id, name, place in stale:
             if user_id in gone:
@@ -1744,25 +1725,28 @@ async def assign_missing(context: ContextTypes.DEFAULT_TYPE) -> None:
                 continue
             dest = random.choice(options)
             label = nicks.get(user_id, name)
-            await asyncio.to_thread(roster.set_place, chat_id, user_id, name, dest)
-            await asyncio.to_thread(roster.log_travel, chat_id, user_id, name,
+            await asyncio.to_thread(roster.set_place, GAME, user_id, name, dest)
+            await asyncio.to_thread(roster.log_travel, GAME, user_id, name,
                                     dest, place, roll)
             moved.append((label, place, dest, roll))
-            await report_to_admin(context.bot, str(chat_id), label, place, dest, roll)
+            await report_to_admin(context.bot, "قرعهٔ روزانه", label, place,
+                                  dest, roll)
 
         if not moved:
-            continue
+            return
         lines = ["⏰ <b>مهلت تمام شد</b>", "برای این افراد قرعه انداختم:", ""]
         for label, origin, dest, roll in moved[:25]:
             piece = f"• {label} → {worldmap.describe(dest)}"
             if roll:
                 piece += f" (تاس {fa_num(roll)})"
             lines.append(piece)
-        try:
-            await context.bot.send_message(chat_id, "\n".join(lines),
-                                           parse_mode="HTML")
-        except Exception as exc:
-            log.info("deadline announcement failed in %s: %s", chat_id, exc)
+        # one game, but the announcement goes to every group it is played in
+        for group in await asyncio.to_thread(roster.groups):
+            try:
+                await context.bot.send_message(group, "\n".join(lines),
+                                               parse_mode="HTML")
+            except Exception as exc:
+                log.info("deadline announcement failed in %s: %s", group, exc)
 
 
 async def deadline_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1799,7 +1783,7 @@ async def kill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     reviving = (message.text or "").lstrip("/").startswith("revive")
-    await asyncio.to_thread(roster.set_dead, chat_id, uid, not reviving)
+    await asyncio.to_thread(roster.set_dead, GAME, uid, not reviving)
     shown = await game_name(chat_id, uid, real)
     await message.reply_text(f"{shown} برگشت به بازی. ✅" if reviving
                              else f"{shown} از بازی خارج شد. ⚰️")
@@ -1815,12 +1799,12 @@ async def dead_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await message.reply_text("فقط مدیر. ⛔️")
         return
 
-    gone = await asyncio.to_thread(roster.dead_ids, chat_id)
+    gone = await asyncio.to_thread(roster.dead_ids, GAME)
     if not gone:
         await message.reply_text("همه زنده‌اند.")
         return
-    rows = {r[0]: r[1] for r in await asyncio.to_thread(roster.all_players, chat_id)}
-    nicks = await asyncio.to_thread(roster.all_nicks, chat_id)
+    rows = {r[0]: r[1] for r in await asyncio.to_thread(roster.all_players, GAME)}
+    nicks = await asyncio.to_thread(roster.all_nicks, GAME)
     lines = ["⚰️ <b>خارج‌شده‌ها</b>", ""]
     for uid in gone:
         name = rows.get(uid, str(uid))
@@ -1852,7 +1836,8 @@ PUBLIC_HELP = """📖 <b>راهنما</b>
 
 <b>بقیه</b>
 /help — همین راهنما
-/whoami — آی‌دی خودت"""
+/whoami — آی‌دی خودت
+"""
 
 ADMIN_HELP = """
 
@@ -1913,7 +1898,7 @@ async def roadwork_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     rest = " ".join(args[1:])
 
     if verb in ("list", "لیست", ""):
-        closed, extra = await asyncio.to_thread(roster.roadwork, chat_id)
+        closed, extra = await asyncio.to_thread(roster.roadwork, GAME)
         if not closed and not extra:
             await message.reply_text(
                 "همهٔ جاده‌ها سالم‌اند.\n"
@@ -1943,13 +1928,13 @@ async def roadwork_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     if verb in ("خراب", "destroy", "close", "ببند"):
-        await asyncio.to_thread(roster.set_road, chat_id, a, b, "closed")
+        await asyncio.to_thread(roster.set_road, GAME, a, b, "closed")
         verdict = f"🚧 جادهٔ {worldmap.name_of(a)} — {worldmap.name_of(b)} خراب شد."
     elif verb in ("بساز", "build", "open", "بازکن"):
-        await asyncio.to_thread(roster.set_road, chat_id, a, b, "open")
+        await asyncio.to_thread(roster.set_road, GAME, a, b, "open")
         verdict = f"🛤 جادهٔ {worldmap.name_of(a)} — {worldmap.name_of(b)} ساخته شد."
     elif verb in ("بازگردان", "reset", "revert"):
-        await asyncio.to_thread(roster.set_road, chat_id, a, b, None)
+        await asyncio.to_thread(roster.set_road, GAME, a, b, None)
         verdict = f"↩️ {worldmap.name_of(a)} — {worldmap.name_of(b)} به حالت اول برگشت."
     else:
         await message.reply_text("خراب / بساز / بازگردان / لیست")

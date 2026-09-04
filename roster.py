@@ -649,3 +649,46 @@ def has_killed(chat_id: int, user_id: int, animal: str) -> bool:
             " AND hit=1 LIMIT 1",
             (chat_id, user_id, animal),
         ).fetchone() is not None
+
+
+def counts() -> dict[str, int]:
+    """Row counts, for telling at a glance whether the database survived a
+    deploy or is starting empty again."""
+    out = {}
+    with _lock:
+        for table in ("players", "nicknames", "votes", "members", "hunts"):
+            try:
+                out[table] = _db().execute(
+                    f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            except Exception:
+                out[table] = 0
+    return out
+
+
+# ------------------------------------------------- which chats to announce in
+
+def remember_group(chat_id: int, title: str | None = None) -> None:
+    """Game data is global, but announcements still need somewhere to land."""
+    if chat_id >= 0:
+        return
+    with _lock:
+        _db().execute(
+            "INSERT INTO settings (chat_id, key, value) VALUES (0,?,?)"
+            " ON CONFLICT(chat_id, key) DO UPDATE SET value=excluded.value",
+            (f"group:{chat_id}", title or ""),
+        )
+        _db().commit()
+
+
+def groups() -> list[int]:
+    with _lock:
+        rows = _db().execute(
+            "SELECT key FROM settings WHERE chat_id=0 AND key LIKE 'group:%'"
+        ).fetchall()
+    out = []
+    for (key,) in rows:
+        try:
+            out.append(int(key.split(":", 1)[1]))
+        except ValueError:
+            continue
+    return out
