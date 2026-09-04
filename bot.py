@@ -67,7 +67,7 @@ CACHE_SIZE = 40
 BLANK = "رأی سفید"
 ADMIN_REFRESH = 6 * 3600
 TOP_N = 10
-VERSION = "2026-08-27.1"
+VERSION = "2026-09-04.nick-preassign-2"
 
 # A message older than this is history, not a new command. Reactions, edits and
 # any backlog Telegram replays after downtime all arrive attached to the
@@ -119,6 +119,64 @@ def hours_left(seconds: float) -> str:
 
 # --------------------------------------------------------------- roster upkeep
 
+# /nick may be assigned before this board has ever seen the user.
+# Numeric IDs can be stored immediately.  Telegram does not reliably resolve
+# arbitrary private-user @usernames for bots, so unknown usernames are kept
+# here as pending settings and bound the instant Telegram exposes username+id.
+PENDING_NICK_ID = "pending_nick_id:"
+PENDING_NICK_USER = "pending_nick_user:"
+_pending_nick_checked: set[tuple[int, int, str]] = set()
+
+
+def _pending_nick_id_key(user_id: int) -> str:
+    return f"{PENDING_NICK_ID}{user_id}"
+
+
+def _pending_nick_user_key(username: str) -> str:
+    return f"{PENDING_NICK_USER}{username.lstrip('@').casefold()}"
+
+
+async def bind_pending_nick(chat_id: int, user) -> str | None:
+    """Attach a pre-assigned nickname as soon as Telegram reveals the user."""
+    if not user or not getattr(user, "id", 0):
+        return None
+
+    username = (getattr(user, "username", None) or "").strip()
+    check_key = (chat_id, user.id, username.casefold())
+    if check_key in _pending_nick_checked:
+        return None
+
+    # Numeric ID is authoritative if both an id and username pending value exist.
+    id_key = _pending_nick_id_key(user.id)
+    nick = await asyncio.to_thread(roster.get_setting, chat_id, id_key)
+
+    user_key = _pending_nick_user_key(username) if username else None
+    if not nick and user_key:
+        nick = await asyncio.to_thread(roster.get_setting, chat_id, user_key)
+
+    _pending_nick_checked.add(check_key)
+    if not nick:
+        return None
+
+    try:
+        await asyncio.to_thread(roster.set_nick, chat_id, user.id, nick)
+    except Exception:
+        # Keep the pending settings intact so the next restart/message can retry.
+        log.exception("failed to bind pending nickname for %s in %s",
+                      user.id, chat_id)
+        _pending_nick_checked.discard(check_key)
+        return None
+
+    # It is bound now; these are only temporary lookup records.
+    await asyncio.to_thread(roster.set_setting, chat_id, id_key, "")
+    if user_key:
+        await asyncio.to_thread(roster.set_setting, chat_id, user_key, "")
+
+    log.info("bound pending nickname in %s: %s (@%s) -> %r",
+             chat_id, user.id, username or "—", nick)
+    return nick
+
+
 async def track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Runs on every message: quietly learns who is in the group."""
     message = update.effective_message
@@ -140,6 +198,7 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await asyncio.to_thread(roster.remember, chat_id, user)
             if user.username:
                 await asyncio.to_thread(roster.store_handle, user.username, user.id)
+            await bind_pending_nick(chat_id, user)
 
     if message.left_chat_member:
         await asyncio.to_thread(roster.forget, chat_id, message.left_chat_member.id)
@@ -156,6 +215,7 @@ async def seed_admins(bot, chat_id: int) -> None:
             if member.user.username:
                 await asyncio.to_thread(roster.store_handle,
                                         member.user.username, member.user.id)
+            await bind_pending_nick(chat_id, member.user)
     except Exception as exc:
         log.debug("admin seed failed for %s: %s", chat_id, exc)
 
@@ -1457,7 +1517,16 @@ async def resolve_person(bot, chat_id: int, text: str):
 
 
 async def set_nick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/nick <person> = <nickname> — admin only. `/nick <person> =` clears it."""
+    """/nick <person> = <nickname> — admin only. `/nick <person> =` clears it.
+
+    Examples:
+      /nick @SomeUsername = شمر
+      /nick 123456789 = شمر
+
+    Numeric IDs work even before the user appears in the group.  If Telegram has
+    never exposed an @username's numeric ID to this bot, the username assignment
+    is stored and attached automatically the first time that user is observed.
+    """
     message = update.effective_message
     chat_id, _ = await board_for(update, context)
     if chat_id is None:
@@ -1468,15 +1537,90 @@ async def set_nick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     raw = " ".join(context.args or [])
     if "=" not in raw:
-        await message.reply_text("/nick <اسم> = <لقب>")
+        await message.reply_text(
+            "/nick @username = <لقب>\n"
+            "/nick 123456789 = <لقب>")
         return
+
     who, _, nick = raw.partition("=")
+    who = who.strip()
     nick = nick.strip()[:20]
 
+    # --- exact numeric Telegram ID -----------------------------------------
+    # Store a pending copy first. If roster.set_nick can already accept this
+    # unseen ID it becomes active immediately; otherwise track() will bind it
+    # after roster.remember() sees the user for the first time.
+    if who.isdigit():
+        uid = int(who)
+        id_key = _pending_nick_id_key(uid)
+        await asyncio.to_thread(roster.set_setting, chat_id, id_key, nick)
+
+        try:
+            await asyncio.to_thread(roster.set_nick, chat_id, uid, nick or None)
+        except Exception as exc:
+            log.info("nickname for unseen id %s saved pending: %s", uid, exc)
+
+        # If this id had already been checked earlier in this process, allow a
+        # future observation to check the newly-written pending value.
+        for key in list(_pending_nick_checked):
+            if key[0] == chat_id and key[1] == uid:
+                _pending_nick_checked.discard(key)
+
+        if nick:
+            await message.reply_text(f"{uid} → «{nick}» ✅")
+        else:
+            await message.reply_text(f"لقب {uid} پاک شد.")
+        return
+
+    # --- exact @username ---------------------------------------------------
+    if who.startswith("@") and len(who) > 1 and not any(c.isspace() for c in who):
+        handle = who[1:]
+        user_key = _pending_nick_user_key(handle)
+
+        # This makes an unknown username assignable immediately as a pending
+        # identity, instead of answering "not found".
+        await asyncio.to_thread(roster.set_setting, chat_id, user_key, nick)
+
+        cached = await asyncio.to_thread(roster.known_handle, handle)
+        if cached:
+            # We already know this username's numeric ID from any previous
+            # observation, so activate the nickname now as well.
+            await asyncio.to_thread(
+                roster.set_setting, chat_id, _pending_nick_id_key(cached), nick
+            )
+            try:
+                await asyncio.to_thread(
+                    roster.set_nick, chat_id, cached, nick or None
+                )
+            except Exception as exc:
+                log.info("nickname for @%s/%s saved pending: %s",
+                         handle, cached, exc)
+
+            for key in list(_pending_nick_checked):
+                if key[0] == chat_id and key[1] == cached:
+                    _pending_nick_checked.discard(key)
+
+            if nick:
+                await message.reply_text(f"@{handle} → «{nick}» ✅")
+            else:
+                await message.reply_text(f"لقب @{handle} پاک شد.")
+        else:
+            if nick:
+                await message.reply_text(
+                    f"@{handle} → «{nick}» ✅\n"
+                    "ذخیره شد؛ لازم نیست قبلاً در گروه پیام داده باشد. "
+                    "به محض اینکه تلگرام آی‌دی این یوزرنیم را به ربات نشان بدهد، "
+                    "لقب خودکار به همان کاربر وصل می‌شود.")
+            else:
+                await message.reply_text(f"لقب ذخیره‌شده برای @{handle} پاک شد.")
+        return
+
+    # --- ordinary known name ----------------------------------------------
+    # Keep the old fuzzy/name behaviour for people the bot already knows.
     uid, real = await resolve_person(context.bot, chat_id, who)
     if not uid:
         await message.reply_text(
-            f"«{who.strip()}» پیدا نشد. با @یوزرنیم یا آی‌دی عددی هم می‌شود.")
+            f"«{who}» پیدا نشد. از @یوزرنیم یا آی‌دی عددی استفاده کن.")
         return
 
     await asyncio.to_thread(roster.set_nick, chat_id, uid, nick or None)
