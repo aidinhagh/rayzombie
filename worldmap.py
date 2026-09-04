@@ -227,6 +227,7 @@ def find(text: str) -> str | None:
     """Match a place by id or Persian name, loosely."""
     from matching import normalize
 
+    text = (text or "").strip().strip("<>\u00ab\u00bb\"'").strip()
     query = normalize(text)
     if not query:
         return None

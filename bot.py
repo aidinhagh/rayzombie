@@ -178,11 +178,19 @@ async def bind_pending_nick(chat_id: int, user) -> str | None:
 
 
 async def track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Runs on every message: quietly learns who is in the group."""
+    """Runs on every message: learns who people are, wherever they say it.
+
+    This used to ignore private chats. Someone who only ever talked to the bot
+    in its DM was therefore never recorded and never matched to the nickname
+    waiting on their @username — the nickname sat pending forever while they
+    played. Anything that identifies a person counts, whatever chat it arrives
+    in; only the group bookkeeping below stays group-only.
+    """
     message = update.effective_message
-    if not message or message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+    if not message:
         return
     chat_id = message.chat_id
+    in_group = message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
 
     people = [message.from_user]
     if message.reply_to_message:
@@ -193,21 +201,29 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if entity.type == MessageEntity.TEXT_MENTION and entity.user:
             people.append(entity.user)
 
-    await asyncio.to_thread(roster.remember_group, chat_id, message.chat.title)
+    if in_group:
+        await asyncio.to_thread(roster.remember_group, chat_id,
+                                message.chat.title)
 
     for user in people:
         if user:
-            await asyncio.to_thread(roster.remember, GAME, user)
-            if user.username:
-                if await asyncio.to_thread(roster.merge_handle, GAME,
-                                           user.username, user.id):
-                    log.info("bound placeholder @%s -> %s", user.username, user.id)
-            if user.username:
-                await asyncio.to_thread(roster.store_handle, user.username, user.id)
-            await bind_pending_nick(chat_id, user)
+            await bind_user(chat_id, user)
 
-    if message.left_chat_member:
+    if in_group and message.left_chat_member:
         await asyncio.to_thread(roster.forget, GAME, message.left_chat_member.id)
+
+
+async def bind_user(chat_id: int, user) -> None:
+    """Record someone and attach anything that was waiting on their username."""
+    if not user or getattr(user, "is_bot", False):
+        return
+    await asyncio.to_thread(roster.remember, GAME, user)
+    if user.username:
+        await asyncio.to_thread(roster.store_handle, user.username, user.id)
+        if await asyncio.to_thread(roster.merge_handle, GAME,
+                                   user.username, user.id):
+            log.info("bound placeholder @%s -> %s", user.username, user.id)
+    await bind_pending_nick(chat_id, user)
 
 
 async def seed_admins(bot, chat_id: int) -> None:
@@ -744,6 +760,15 @@ async def may(chat_id: int, user_id: int, key: str) -> bool:
     return str(user_id) in raw.split(",")
 
 
+def clean_arg(text: str) -> str:
+    """Strip the punctuation people copy out of a usage line.
+
+    `/setloc <@someone> = <مسجد کوفه>` is what the help text looks like, so it
+    is what gets typed. Angle brackets and quotes are never part of a name.
+    """
+    return (text or "").strip().strip("<>\u00ab\u00bb\"'\u200f\u200e").strip()
+
+
 def display_name(user) -> str:
     return (user.first_name or user.username or str(user.id))[:16]
 
@@ -1157,6 +1182,7 @@ async def travel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     user = message.from_user
+    await bind_user(message.chat_id, user)   # a DM-only player still gets bound
 
     if await asyncio.to_thread(roster.is_dead, GAME, user.id):
         await message.reply_text("تو از بازی خارج شده‌ای. ⚰️")
@@ -1387,23 +1413,25 @@ async def set_location(update: Update,
         return
     who, _, where_text = raw.partition("=")
 
-    target, _ = best_match(who.strip(), await chat_candidates(chat_id))
-    if not target:
-        await message.reply_text(f"کسی به اسم «{who.strip()}» پیدا نشد.")
-        return
-    place = worldmap.find(where_text.strip())
+    place = worldmap.find(where_text)
     if not place:
-        await message.reply_text(f"مکانی به اسم «{where_text.strip()}» نداریم.")
+        await message.reply_text(f"مکانی به اسم «{clean_arg(where_text)}» نداریم.")
         return
 
-    uid = await ensure_user_id(context.bot, target)
+    # Same resolver as /nick: an @username the bot has never seen gets a
+    # placeholder rather than a refusal, so someone can be put on the map
+    # before they have ever typed a word.
+    uid, label = await resolve_person(context.bot, GAME, who)
     if not uid:
-        await message.reply_text("این نفر هنوز آی‌دی ندارد — یک پیام بدهد.")
+        await message.reply_text(
+            f"«{clean_arg(who)}» پیدا نشد. با @یوزرنیم یا آی‌دی عددی هم می‌شود.")
         return
-    label = seed.display_for(target) or target.display
+
     await asyncio.to_thread(roster.set_place, GAME, uid, label, place)
-    shown = await game_name(chat_id, uid, label)
-    await message.reply_text(f"{shown} → {worldmap.name_of(place)} ✅")
+    note = " (هنوز پیامی نداده؛ به‌محض دیده‌شدن وصل می‌شود)" \
+        if roster.is_placeholder(uid) else ""
+    await message.reply_text(
+        f"{label} → {worldmap.name_of(place)} ✅{note}")
 
 
 async def clear_locations(update: Update,
@@ -1491,7 +1519,7 @@ async def resolve_person(bot, chat_id: int, text: str):
     An id or a handle is exact, which matters for admin commands — you do not
     want a fuzzy match deciding who just died.
     """
-    text = (text or "").strip()
+    text = clean_arg(text)
     if not text:
         return None, None
 
@@ -1526,6 +1554,10 @@ async def resolve_person(bot, chat_id: int, text: str):
     if not target:
         return None, None
     uid = await ensure_user_id(bot, target)
+    if not uid and target.username:
+        # matched a known person whose id Telegram has not shown us yet: hold
+        # their place with the same placeholder an @handle would get
+        uid = roster.placeholder_id(target.username)
     return (uid or None), (seed.display_for(target) or target.display)
 
 
@@ -1557,7 +1589,7 @@ async def set_nick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     who, _, nick = raw.partition("=")
     who = who.strip()
-    nick = nick.strip()[:20]
+    nick = clean_arg(nick)[:20]
 
     # --- exact numeric Telegram ID -----------------------------------------
     # Store a pending copy first. If roster.set_nick can already accept this
