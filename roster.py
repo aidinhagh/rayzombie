@@ -424,6 +424,20 @@ def others_at(chat_id: int, place: str, exclude: int, limit: int = 3
     return [r[0] for r in rows]
 
 
+def others_at_ids(chat_id: int, place: str, exclude: int,
+                  limit: int = 3) -> list[tuple[int, str]]:
+    """(user_id, name) of others at the same place — ids so a nickname can be
+    matched exactly rather than by a name that two people might share."""
+    with _lock:
+        rows = _db().execute(
+            """SELECT user_id, name FROM players
+                WHERE chat_id=? AND place=? AND user_id<>? AND name IS NOT NULL
+             ORDER BY updated DESC LIMIT ?""",
+            (chat_id, place, exclude, limit),
+        ).fetchall()
+    return [(r[0], r[1]) for r in rows]
+
+
 def clear_place(chat_id: int, user_id: int) -> int:
     with _lock:
         cur = _db().execute("DELETE FROM players WHERE chat_id=? AND user_id=?",

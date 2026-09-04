@@ -57,8 +57,10 @@ def _audit():
     # game_name is the helper itself; travel() looks a nickname up only to hand
     # it to report_roll and the admin's copy of the trip record — every
     # player-facing string in it uses the real name.
+    # on_travel_button reads nicknames on purpose: the ride shows in-game
+    # names, never real ones. Everything else here only reports to the admin.
     ADMIN_SENDERS = {"report_to_admin", "report_roll", "assign_missing",
-                     "game_name", "travel"}
+                     "game_name", "travel", "on_travel_button"}
     out = []
     for name, node in funcs.items():
         body = ast.get_source_segment(src, node) or ""

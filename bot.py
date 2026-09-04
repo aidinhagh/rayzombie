@@ -1298,10 +1298,12 @@ async def on_travel_button(update: Update,
     await asyncio.to_thread(roster.set_place, GAME, user_id, real, arg)
     await asyncio.to_thread(roster.log_travel, GAME, user_id, real, arg,
                             origin, roll)
-    # Real names on the road. A nickname is something only the admin knows, so
-    # showing other riders' nicknames would hand them out to everyone who
-    # travels to the same place.
-    others = await asyncio.to_thread(roster.others_at, GAME, arg, user_id, 3)
+    # The ride is the world: everyone in it goes by their nickname, never by
+    # their real name. Anyone without one is just a traveller.
+    pairs = await asyncio.to_thread(roster.others_at_ids, GAME, arg, user_id, 3)
+    nicks = await asyncio.to_thread(roster.all_nicks, GAME)
+    others = [nicks.get(uid) or "مسافر" for uid, _name in pairs]
+    ride_name = nicks.get(user_id) or "مسافر"
 
     await query.answer(f"راهیِ {worldmap.name_of(arg)} شدی 🐫")
 
@@ -1319,7 +1321,7 @@ async def on_travel_button(update: Update,
     ride_token = secrets.token_urlsafe(8).replace("-", "_")
     await asyncio.to_thread(roster.save_trip, ride_token, json.dumps({
         "to": arg, "kind": worldmap.KIND.get(arg, "oasis"),
-        "title": worldmap.name_of(arg), "name": real,
+        "title": worldmap.name_of(arg), "name": ride_name,
         "from": worldmap.name_of(origin) if origin else "",
         "others": others,
         "quarry": pick_quarry(),
